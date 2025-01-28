@@ -1,0 +1,7 @@
+variable,class_units,description
+timestamp,yyyy-mm-dd h:m,date and time of record
+qlevel,numeric,quality level 
+qflag,character,quality flag
+qrate,"numeric, m3 s-1","streamflow rate, how much water is passing through a given cross-section of the stream or river over time"
+latitude,numeric,site coordinates
+longitude,numeric,site coorinates
