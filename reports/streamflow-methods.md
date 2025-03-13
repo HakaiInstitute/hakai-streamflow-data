@@ -3,7 +3,8 @@
 In natural streams, continuous measurement of stream discharge is not feasible. Instead, an indirect approach was employed: river height (stage) was continuously measured at a gauging station using a pressure transducer, and periodic discharge measurements were taken across a range of potential stages to develop a stage-discharge rating curve. A detailed description of the measurement methods can be found in [Korver et al. (2020)](https://essd.copernicus.org/articles/14/4231/2022/essd-14-4231-2022.pdf).
 
 Pressure transducers were installed in fall 2013 at watershed 708, and in fall 2014 at the other watersheds. Low flow measurements were manually obtained using the velocity-area method, with either a Swoffer Current Velocimeter or a Sontek Acoustic Doppler Velocimeter. For stream flows typically greater than 0.5 m³/s, the salt dilution method was used—either manually (dry salt) or remotely (beginning in fall 2015) with a fully automated system. The automated salt dilution system (auto-salt) releases pre-defined volumes of salt solution at specific water stages, with two electrical conductivity sensors placed downstream to measure the salt wave. Data are available in near real-time via the Hakai Telemetry Network (www.hakai.org/technology/#science-1).
-General Data QC and Analysis
+
+###General Data QC and Analysis
 
 Stage-discharge rating curves are dynamic and can shift over time due to changes in river channel morphology, often resulting from flood events. As such, these rating curves are regularly updated, especially after high-flow events.
 

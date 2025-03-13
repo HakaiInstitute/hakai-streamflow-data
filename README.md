@@ -1,5 +1,5 @@
 
-# Streamflow Time Series Data Repository
+# Hakai Streamflow Time Series Data from the Kwakshua Watersheds Observatory 
 
 ## Overview
 - This dataset represents streamflow time series collected at 5-minute intervals and updated annually, offering high-resolution data for monitoring and analyzing streamflow dynamics. The data is generated using the autosalt dilution method, a novel and reliable technique that involves injecting a salt solution into the stream and measuring changes in electrical conductivity to calculate discharge. 
@@ -87,9 +87,6 @@ The scripts/ folder contains reusable code to help users process and analyze the
 - Analysis Tools: Scripts assessing and developing rating curves.
 
 
-## License
-- **Creative Commons Attribution 4.0**, **MIT License**
-
 ---
 
 ## Acknowledgments
@@ -98,15 +95,10 @@ The scripts/ folder contains reusable code to help users process and analyze the
 
 ---
 
-## Citing This Repository
-- Include a citation format if this data is used in academic or professional work:
-  ```
-  Floyd, W.C., Haughton, E.R., Korver, M. (2024). Streamflow Time Series Data Repository. GitHub. https://github.com/yourusername/streamflow-data
-  ```
 
 ---
 
 ## Contact
 - Name: [Emily Haughton]
-- Email: [emily.haughton@hakai.org]
+- Email: [emily.haughton@hakai.org], [data@hakai.org]
 - GitHub: [@emilyhaughton](https://github.com/emilyhaughton)
