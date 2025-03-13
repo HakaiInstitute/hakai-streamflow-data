@@ -2,8 +2,8 @@
 # Hakai Streamflow Time Series Data from the Kwakshua Watersheds Observatory 
 
 ## Overview
-- This dataset represents streamflow time series collected at 5-minute intervals and updated annually, offering high-resolution data for monitoring and analyzing streamflow dynamics. The data is generated using the autosalt dilution method, a novel and reliable technique that involves injecting a salt solution into the stream and measuring changes in electrical conductivity to calculate discharge. 
-- This method ensures accurate streamflow measurements, even during high-flow events, making it particularly useful for hydrological studies, water resource management, and environmental assessments. Updated annually, the dataset provides a comprehensive and dependable record of streamflow conditions, crucial for understanding the impacts of climate variability and land-use changes on watershed hydrology.
+- This dataset represents streamflow time series collected at 5-minute intervals and updated annually, offering high-resolution data for monitoring and analyzing streamflow dynamics. The data is generated using the autosalt dilution method, a novel technique that involves injecting a salt solution into the stream and measuring changes in electrical conductivity to calculate discharge. 
+- This method ensures accurate streamflow measurements, even during high-flow events, making it particularly useful for hydrological studies, water resource management, and environmental assessments. Updated annually, the dataset provides a comprehensive record of streamflow conditions, crucial for understanding the impacts of climate variability and land-use changes on watershed hydrology.
 
 
 
