@@ -6,7 +6,7 @@ on:
     paths:
       - 'data-sharing/**'
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
+   - cron: '0 0 * * *'  # Every 24 hours at midnight UTC
 
 jobs:
   run-r-script:
