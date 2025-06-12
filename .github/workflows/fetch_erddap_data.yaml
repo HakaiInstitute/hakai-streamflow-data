@@ -3,6 +3,10 @@ name: Fetch ERDDAP data
 on:
   pull_request:
     branches: main
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  push:
+    branches: main
 
 jobs:
   run-r-script:
@@ -32,8 +36,9 @@ jobs:
 
     - name: Run R script
       run: Rscript ${{ fromJSON(steps.config.outputs.json).script_path }}
-    
+
     - name: Upload artifact
+      if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
         name: erddap-data
