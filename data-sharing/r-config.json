@@ -1,6 +1,6 @@
 {
     "interpreter":"R",
-    "script_path": "fetch-erddap_data.R",
+    "script_path": "fetch_erddap_data.R",
     "packages": [
         "any::rerddap",
         "any::glue", 
