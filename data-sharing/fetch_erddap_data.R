@@ -35,11 +35,14 @@ tryCatch(
       dataset_id,
       fields = columns,
       store = disk("."),
+      fmt = 'parquet',
       time_param
     )
 
     temp_file_name <- attr(discharge_output, "path")
-    file_name <- glue("{dataset_id}_since_{time_constraint}.csv")
+    file_name <- glue("{dataset_id}_since_{time_constraint}.parquet")
+    ## make ftp safe
+    file_name <- gsub(":", "-", file_name)
     file.rename(temp_file_name, file_name)
 
 
