@@ -3,10 +3,10 @@ name: Fetch ERDDAP data
 on:
   pull_request:
     branches: main
+    paths:
+      - 'data-sharing/**'
   schedule:
     - cron: '*/5 * * * *'  # Every 5 minutes
-  push:
-    branches: main
 
 jobs:
   run-r-script:
