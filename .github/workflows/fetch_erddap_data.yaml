@@ -1,0 +1,46 @@
+name: Fetch ERDDAP data
+
+on:
+  pull_request:
+    branches: main
+    paths:
+      - 'data-sharing/**'
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+
+jobs:
+  run-r-script:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-sharing
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Read config
+      id: config
+      run: echo "json=$(jq -c . r-config.json)" >> $GITHUB_OUTPUT
+
+    - name: Set up R
+      uses: r-lib/actions/setup-r@v2
+      with:
+        r-version: 'release'
+        use-public-rspm: true
+
+    - name: Install R dependencies
+      uses: r-lib/actions/setup-r-dependencies@v2
+      with:
+        packages: ${{ join(fromJSON(steps.config.outputs.json).packages, '\n') }}
+        cache-version: 1
+
+    - name: Run R script
+      run: Rscript ${{ fromJSON(steps.config.outputs.json).script_path }}
+
+    - name: Upload artifact
+      if: github.event_name != 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: erddap-data
+        path: "*.csv"
+        retention-days: 30
