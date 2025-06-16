@@ -4,6 +4,7 @@
     "packages": [
         "any::rerddap",
         "any::glue", 
-        "any::logger"
+        "any::logger",
+        "any::nanoparquet"
     ]
 }

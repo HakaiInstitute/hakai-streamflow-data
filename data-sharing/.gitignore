@@ -1,2 +1,4 @@
 *.csv
 *.parquet
+
+!hakai-id-mapping.csv
