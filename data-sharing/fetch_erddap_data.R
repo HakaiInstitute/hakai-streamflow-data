@@ -1,6 +1,7 @@
 library(rerddap)
 library(logger)
 library(glue)
+library(nanoparquet)
 
 Sys.setenv(RERDDAP_DEFAULT_URL = "https://catalogue.hakai.org/erddap/")
 log_info(glue(
@@ -19,6 +20,14 @@ columns <- c(
   "pls_lvl_ql",
   "pls_lvl_qc"
 )
+
+join_descriptor_cols <- function(.data) {
+  mapping <- read.csv("hakai-id-mapping.csv")
+  .data <- mapping |> 
+    merge(.data, by = "station")
+  .data$station <- NULL
+  .data
+}
 
 
 yesterday <- Sys.time() - as.difftime(1, units = "days")
@@ -39,12 +48,16 @@ tryCatch(
       time_param
     )
 
-    temp_file_name <- attr(discharge_output, "path")
+    discharge_output <- discharge_output |> 
+      join_descriptor_cols()
+
     file_name <- glue("{dataset_id}_since_{time_constraint}.parquet")
     ## make ftp safe
     file_name <- gsub(":", "-", file_name)
-    file.rename(temp_file_name, file_name)
-
+    write_parquet(
+      discharge_output,
+      file = file_name
+    )
 
     log_info(glue("Retrieved {nrow(discharge_output)} rows in {file_name}"))
   },
