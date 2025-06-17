@@ -5,6 +5,7 @@
         "any::rerddap",
         "any::glue", 
         "any::logger",
-        "any::nanoparquet"
+        "any::nanoparquet",
+        "any::here"
     ]
 }
