@@ -6,7 +6,7 @@ on:
     paths:
       - 'data-sharing/**'
   schedule:
-   - cron: '0 0 * * *'  # Every 24 hours at midnight UTC
+   - cron: '0 */6 * * *'  # Every 6 hours
 
 jobs:
   run-r-script:
@@ -37,10 +37,26 @@ jobs:
     - name: Run R script
       run: Rscript ${{ fromJSON(steps.config.outputs.json).script_path }}
 
-    - name: Upload artifact
+    - name: Record last passed dates
+      if: github.event_name != 'pull_request'
+      uses: stefanzweifel/git-auto-commit-action@778341af668090896ca464160c2def5d1d1a3eb0
+      with:
+        commit_message: "Recording last passed measurements"
+        file_pattern: "data-sharing/last_passed_measurements.csv"
+
+    - name: Upload last passed measurement
       if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: erddap-data
-        path: "*.csv"
+        name: last_passed_measurements
+        path: "data-sharing/last_passed_measurements.csv"
         retention-days: 30
+
+    - name: Upload parquet file
+      if: github.event_name != 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: upload parquet
+        path: "data-sharing/*.parquet"
+        retention-days: 30
+        
