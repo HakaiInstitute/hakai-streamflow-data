@@ -12,28 +12,26 @@ log_info(glue(
 dataset_id <- "HakaiWatershedsStreamStationsProvisional"
 
 columns <- c(
-  "station",
+  "station_id",
+  "station_description",
   "longitude",
   "latitude",
   "time",
+  "last_updated_lvl_status",
   "pls_lvl",
   "pls_lvl_ql",
-  "pls_lvl_qc"
-)
+  "pls_lvl_qc",
+  "discharge_rate",
+  "discharge_volume_ql",
+  "discharge_volume_qc"
 
-join_descriptor_cols <- function(.data) {
-  mapping <- read.csv("hakai-id-mapping.csv")
-  .data <- mapping |> 
-    merge(.data, by = "station")
-  .data$station <- NULL
-  .data
-}
+)
 
 
 yesterday <- Sys.time() - as.difftime(1, units = "days")
 time_constraint <- format(yesterday, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
 # Format time constraint for ERDDAP
-time_param <- paste0("time>=", time_constraint)
+time_param <- paste0("last_updated_lvl_time>=", time_constraint)
 
 log_info(glue("Querying '{dataset_id}' dataset since {time_constraint} (UTC)}"))
 
@@ -48,16 +46,11 @@ tryCatch(
       time_param
     )
 
-    discharge_output <- discharge_output |> 
-      join_descriptor_cols()
-
+    temp_file_name <- file.path(attr(discharge_output, "path"))
     file_name <- glue("{dataset_id}_since_{time_constraint}.parquet")
     ## make ftp safe
     file_name <- gsub(":", "-", file_name)
-    write_parquet(
-      discharge_output,
-      file = file_name
-    )
+    file.rename(temp_file_name, file_name)
 
     log_info(glue("Retrieved {nrow(discharge_output)} rows in {file_name}"))
   },
