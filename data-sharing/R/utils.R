@@ -46,7 +46,7 @@ record_last_passed_measurements <- function(file_name) {
 #' @param df Data frame with columns station_id and time
 #' @return Filtered data frame excluding previously processed measurements
 remember_last_passed_measurements <- function(df) {
-  last_passed_measurements <- "data-sharing/last_passed_measurements.csv"
+  last_passed_measurements <- here::here("data-sharing/last_passed_measurements.csv")
   is_present <- file.exists(last_passed_measurements)
 
   if (is_present) {
@@ -77,7 +77,7 @@ remember_last_passed_measurements <- function(df) {
 #'
 #' @return Character string of the latest measurement time in ISO 8601 format
 remember_min_last_passed_measurement <- function() {
-  last_passed_measurements <- "data-sharing/last_passed_measurements.csv"
+  last_passed_measurements <- here::here("data-sharing/last_passed_measurements.csv")
   latest_times <- read_last_measurements(last_passed_measurements)
   max_time <- max(latest_times$latest_time)
   format(max_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")

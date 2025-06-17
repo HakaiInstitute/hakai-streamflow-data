@@ -2,3 +2,4 @@
 *.parquet
 
 !hakai-id-mapping.csv
+!last_passed_measurements.csv
