@@ -5,9 +5,9 @@ library(nanoparquet)
 library(here)
 
 Sys.setenv(RERDDAP_DEFAULT_URL = "https://catalogue.hakai.org/erddap/")
-log_info(glue(
+log_info(
   "Using the '{Sys.getenv('RERDDAP_DEFAULT_URL')}' ERDDAP instance"
-))
+)
 
 source(here("data-sharing/R/utils.R"))
 
@@ -32,8 +32,9 @@ columns <- c(
 
 
 # Format time constraint for ERDDAP
-time_param <- paste0("last_updated_lvl_time>=", remember_min_last_passed_measurement())
-log_info(glue("Querying '{dataset_id}' dataset since {time_constraint} (UTC)}"))
+time_constraint <- remember_min_last_passed_measurement()
+time_param <- glue("last_updated_lvl_time>={time_constraint}")
+log_info("Querying '{dataset_id}' dataset since {time_constraint} (UTC)}")
 
 # Fetch data
 tryCatch(
@@ -53,7 +54,7 @@ tryCatch(
     file_name <- gsub(":", "-", file_name)
     write_parquet(discharge_output, file_name)
 
-    log_info(glue("Retrieved {nrow(discharge_output)} rows in {file_name}"))
+    log_info("Retrieved {nrow(discharge_output)} rows in {file_name}")
   },
   error = function(e) {
     log_info("Error:", as.character(e), "\n")
