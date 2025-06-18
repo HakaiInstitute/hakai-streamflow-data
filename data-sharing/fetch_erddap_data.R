@@ -17,7 +17,8 @@ tryCatch(
     stop('This is a test error from prov data sharing')
   },
   error = function(e) {
-    if (Sys.getenv("GITHUB_REF_NAME") == "test/sentry-integration") {
+    # if (Sys.getenv("GITHUB_REF_NAME") == "test/sentry-integration") {
+    if (TRUE) {
       configure_sentry(
         dsn = Sys.getenv("SENTRY_DSN"),
         app_name = 'data-sharing',
