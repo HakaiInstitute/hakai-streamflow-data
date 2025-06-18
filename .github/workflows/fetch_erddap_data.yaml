@@ -39,6 +39,14 @@ jobs:
         cache-version: 1
 
     - name: Run R script
+      env:
+        SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_WORKFLOW: ${{ github.workflow }}
       run: Rscript ${{ fromJSON(steps.config.outputs.json).script_path }}
 
     - name: Record last passed dates
