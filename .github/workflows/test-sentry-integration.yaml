@@ -1,4 +1,4 @@
-name: Test Sentry Integration
+name: Test Sentry Integration with R
 
 on: 
   pull_request:
@@ -9,33 +9,46 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Simulate failure
-      id: test_step
+    - name: Setup R
+      uses: r-lib/actions/setup-r@v2
+      with:
+        r-version: '4.3'
+        
+    - name: Install sentryR
       run: |
-        echo "always fail for testing"
-        exit 1
-      continue-on-error: true
+        install.packages("sentryR")
+      shell: Rscript {0}
       
-    - name: Send error to Sentry
-      if: steps.test_step.outcome == 'failure'
+    - name: Test failure and send to Sentry
       run: |
-        curl -X POST "${{ secrets.SENTRY_DSN }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "message": {
-              "message": "test failure"
-            },
-            "level": "error",
-            "tags": {
-              "repository": "${{ github.repository }}",
-              "branch": "${{ github.ref_name }}"
-            },
-            "extra": {
-              "commit": "${{ github.sha }}",
-              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }
-          }'
-          
-    - name: Fail the job
-      if: steps.test_step.outcome == 'failure'  
-      run: exit 1
+        Rscript -e "
+        library(sentryR)
+        
+        # Configure Sentry
+        configure_sentry(
+          dsn = '${{ secrets.SENTRY_DSN }}',
+          app_name = 'github-actions-test',
+          app_version = '${{ github.sha }}',
+          environment = 'ci',
+          tags = list(
+            repository = '${{ github.repository }}',
+            branch = '${{ github.ref_name }}',
+            workflow = '${{ github.workflow }}'
+          )
+        )
+        
+        # Simulate a failure and capture it
+        tryCatch({
+          stop('This is a test error from GitHub Actions!')
+        }, error = function(e) {
+          capture_exception(
+            error = e,
+            extra = list(
+              run_url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+              actor = '${{ github.actor }}',
+              commit = '${{ github.sha }}'
+            )
+          )
+          stop(e)  # Re-throw to fail the job
+        })
+        "
