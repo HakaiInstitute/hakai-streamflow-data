@@ -1,0 +1,40 @@
+name: Test Sentry Integration
+
+on: 
+  workflow_dispatch:  # Manual trigger for testing
+
+jobs:
+  test-sentry:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Simulate failure
+      id: test_step
+      run: |
+        echo "always fail for testing"
+        exit 1
+      continue-on-error: true
+      
+    - name: Send error to Sentry
+      if: steps.test_step.outcome == 'failure'
+      run: |
+        curl -X POST "${{ secrets.SENTRY_DSN }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "message": {
+              "message": "test failure"
+            },
+            "level": "error",
+            "tags": {
+              "repository": "${{ github.repository }}",
+              "branch": "${{ github.ref_name }}"
+            },
+            "extra": {
+              "commit": "${{ github.sha }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+          }'
+          
+    - name: Fail the job
+      if: steps.test_step.outcome == 'failure'  
+      run: exit 1
