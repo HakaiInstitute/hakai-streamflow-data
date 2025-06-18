@@ -29,7 +29,7 @@ record_last_passed_measurements <- function(file_name) {
   )
   write.csv(
     latest_times,
-    "data-sharing/last_passed_measurements.csv",
+    here("data-sharing/last_passed_measurements.csv"),
     row.names = FALSE
   )
   logger::log_info("Recorded last successful export")
