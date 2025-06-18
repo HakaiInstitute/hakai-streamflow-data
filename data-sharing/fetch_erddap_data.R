@@ -67,7 +67,7 @@ tryCatch(
     
     # if (resp$status_code == 226) {
     if (TRUE) {
-      log_info(filename, " successfully transferred")
+      log_info(file_name, " successfully transferred")
       record_last_passed_measurements(file_name)
     }
     
