@@ -124,3 +124,13 @@ get_station_measurements <- function(date, station_id) {
     return(NULL)
   })
 }
+
+
+
+is_gha <- function() {
+  Sys.getenv("GITHUB_ACTIONS") == "true"
+}
+
+is_main <- function() {
+  Sys.getenv("GITHUB_REF_NAME") == "main"
+}

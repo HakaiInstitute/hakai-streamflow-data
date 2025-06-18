@@ -10,6 +10,20 @@ log_info(
   "Using the '{Sys.getenv('RERDDAP_DEFAULT_URL')}' ERDDAP instance"
 )
 
+if (is_gha()) {
+    configure_sentry(
+    dsn = Sys.getenv("SENTRY_DSN"),
+    app_name = 'data-sharing',
+    app_version = Sys.getenv("GITHUB_SHA"),
+    environment = 'ci',
+    tags = list(
+      repository = Sys.getenv("GITHUB_REPOSITORY"),
+      branch = Sys.getenv("GITHUB_REF_NAME"),
+      workflow = Sys.getenv("GITHUB_WORKFLOW")
+    )
+  )
+}
+
 
 
 tryCatch(
@@ -17,19 +31,8 @@ tryCatch(
     stop('This is a test error from prov data sharing')
   },
   error = function(e) {
-    # if (Sys.getenv("GITHUB_REF_NAME") == "test/sentry-integration") {
-    if (TRUE) {
-      configure_sentry(
-        dsn = Sys.getenv("SENTRY_DSN"),
-        app_name = 'data-sharing',
-        app_version = Sys.getenv("GITHUB_SHA"),
-        environment = 'ci',
-        tags = list(
-          repository = Sys.getenv("GITHUB_REPOSITORY"),
-          branch = Sys.getenv("GITHUB_REF_NAME"),
-          workflow = Sys.getenv("GITHUB_WORKFLOW")
-        )
-      )
+    # if (is_main()) {
+    if (TRUE && is_gha()) {
       capture_exception(
         error = e,
         extra = list(
