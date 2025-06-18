@@ -10,6 +10,8 @@ log_info(
   "Using the '{Sys.getenv('RERDDAP_DEFAULT_URL')}' ERDDAP instance"
 )
 
+source(here("data-sharing/R/utils.R"))
+
 if (is_gha()) {
     configure_sentry(
     dsn = Sys.getenv("SENTRY_DSN"),
@@ -25,28 +27,16 @@ if (is_gha()) {
 }
 
 
-
 tryCatch(
   {
     stop('This is a test error from prov data sharing')
   },
   error = function(e) {
-    # if (is_main()) {
-    if (TRUE && is_gha()) {
-      capture_exception(
-        error = e,
-        extra = list(
-          run_url = Sys.getenv("GITHUB_RUN_URL"),
-          commit = Sys.getenv("GITHUB_SHA")
-        )
-      )
-    }
-
+    capture_sentry_exeptions(e)
     stop(e)
   }
 )
 
-source(here("data-sharing/R/utils.R"))
 
 # Configuration
 dataset_id <- "HakaiWatershedsStreamStationsProvisional"
@@ -85,6 +75,7 @@ tryCatch(
     log_info("Retrieved {nrow(station_data)} rows in {file_name}")
   },
   error = function(e) {
+    capture_sentry_exception(e)
     log_info("Error:", as.character(e), "\n")
   }
 )
@@ -101,6 +92,7 @@ tryCatch(
     
   },
   error = function(e) {
+    ccapture_sentry_exception(e)
     log_info("Error:", as.character(e), "\n")
   }
 )

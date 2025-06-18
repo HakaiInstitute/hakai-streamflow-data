@@ -126,6 +126,19 @@ get_station_measurements <- function(date, station_id) {
 }
 
 
+capture_sentry_exception <- function(e) {
+  # if (is_main() && is_gha()) {
+  if (TRUE && is_gha()) {
+    capture_exception(
+      error = e,
+      extra = list(
+        run_url = Sys.getenv("GITHUB_RUN_URL"),
+        commit = Sys.getenv("GITHUB_SHA")
+      )
+    )
+  }
+}
+
 
 is_gha <- function() {
   Sys.getenv("GITHUB_ACTIONS") == "true"
