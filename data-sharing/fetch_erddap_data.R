@@ -27,34 +27,25 @@ columns <- c(
   "discharge_rate",
   "discharge_volume_ql",
   "discharge_volume_qc"
-
 )
 
-
-# Format time constraint for ERDDAP
-time_constraint <- remember_min_last_passed_measurement()
-time_param <- glue("last_updated_lvl_time>={time_constraint}")
-log_info("Querying '{dataset_id}' dataset since {time_constraint} (UTC)}")
+make_ftp_safe_filename <- function(df, dataset_id) {
+    time_last_pass <- format(min(df$time), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    
+    file_name <- glue("{dataset_id}_since_{time_last_pass}.parquet")
+    ## make ftp safe
+    gsub(":", "-", file_name)
+}
 
 # Fetch data
 tryCatch(
   {
-    discharge_output <- tabledap(
-      dataset_id,
-      fields = columns,
-      store = disk("."),
-      fmt = 'parquet',
-      time_param
-    )
+    last_measurements <- read_last_measurements()
+    station_data <- fetch_station_data(last_measurements)
+    file_name <- make_ftp_safe_filename(station_data, dataset_id)
+    write_parquet(station_data, file_name)
 
-    discharge_output <- remember_last_passed_measurements(discharge_output)
-    
-    file_name <- glue("{dataset_id}_since_{time_constraint}.parquet")
-    ## make ftp safe
-    file_name <- gsub(":", "-", file_name)
-    write_parquet(discharge_output, file_name)
-
-    log_info("Retrieved {nrow(discharge_output)} rows in {file_name}")
+    log_info("Retrieved {nrow(station_data)} rows in {file_name}")
   },
   error = function(e) {
     log_info("Error:", as.character(e), "\n")

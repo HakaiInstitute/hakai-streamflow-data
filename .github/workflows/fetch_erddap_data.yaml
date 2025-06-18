@@ -6,7 +6,7 @@ on:
     paths:
       - 'data-sharing/**'
   schedule:
-   - cron: '0 */6 * * *'  # Every 6 hours
+   - cron: '0 15 * * *'  # Every 24 hours at 3pm UTC (8am Pacific)
   workflow_dispatch: 
 
 jobs:
@@ -47,14 +47,6 @@ jobs:
       with:
         commit_message: "Recording last passed measurements"
         file_pattern: "data-sharing/last_passed_measurements.csv"
-
-    - name: Upload last passed measurement
-      if: github.event_name != 'pull_request'
-      uses: actions/upload-artifact@v4
-      with:
-        name: last_passed_measurements
-        path: "data-sharing/last_passed_measurements.csv"
-        retention-days: 30
 
     - name: Upload parquet file
       if: github.event_name != 'pull_request'
