@@ -29,7 +29,13 @@ jobs:
         export-env: false
       env:
         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        SENTRY_DSN: op://EIMS Administrator/prov-data-sharing-sentry-dsn/credential
+        SENTRY_DSN: op://EIMS Administrator/prov-data-sharing-sentry/sentry_dsn
+        SENTRY_CRONS: op://EIMS Administrator/prov-data-sharing-sentry/sentry_crons
+    
+    - name: Notify Sentry - Job Running
+      env:
+        SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
+      run: curl "${{ SENTRY_CRONS }}?status=in_progress"
     
     - name: Read config
       id: config
@@ -71,4 +77,8 @@ jobs:
         name: upload parquet
         path: "data-sharing/*.parquet"
         retention-days: 30
-        
+
+    - name: Notify Sentry - Job Finished
+      env:
+        SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
+      run: curl "${{ SENTRY_CRONS }}?status=ok"
