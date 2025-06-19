@@ -36,7 +36,7 @@ jobs:
     - name: Notify Sentry - Job Running
       env:
         SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
-      run: curl "${{ SENTRY_CRONS }}?status=in_progress"
+      run: curl "${SENTRY_CRONS}?status=in_progress"
     
     - name: Read config
       id: config
@@ -82,4 +82,4 @@ jobs:
     - name: Notify Sentry - Job Finished
       env:
         SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
-      run: curl "${{ SENTRY_CRONS }}?status=ok"
+      run: curl "${SENTRY_CRONS }?status=ok"
