@@ -61,9 +61,17 @@ tryCatch(
   }
 )
 
-
-tryCatch(
+if (TRUE) {
+  tryCatch(
   {
+    ftp_url <- Sys.getenv("FTP_URL")
+    # resp <- curl_upload(
+    #   url = paste0(ftp_url, basename(file_name)),
+    #   file = file_name
+    # )
+    log_info(file_name, " is what is to be passed")
+    log_info(basename(file_name), " is the basename")
+
     # if (resp$status_code == 226) {
     if (TRUE) {
       log_info(file_name, " successfully transferred")
@@ -71,7 +79,9 @@ tryCatch(
     }
   },
   error = function(e) {
-    capture_sentry_exception(e)
+    # capture_sentry_exception(e)
     log_error(as.character(e))
   }
-)
+  )
+}
+

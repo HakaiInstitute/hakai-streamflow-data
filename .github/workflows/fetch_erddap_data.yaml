@@ -32,6 +32,7 @@ jobs:
         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
         SENTRY_DSN: op://EIMS Administrator/prov-data-sharing-sentry/sentry_dsn
         SENTRY_CRONS: op://EIMS Administrator/prov-data-sharing-sentry/sentry_crons
+        FTP_URL: op://EIMS Administrator/prov-data-sharing-sentry/ftp_url
     
     - name: Notify Sentry - Job Running
       if: github.event_name != 'pull_request'
@@ -58,6 +59,7 @@ jobs:
     - name: Run R script
       env:
         SENTRY_DSN: ${{ steps.op-load-secret.outputs.SENTRY_DSN }} 
+        FTP_URL: ${{ steps.op-load-secret.outputs.FTP_URL }} 
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
         GITHUB_SHA: ${{ github.sha }}
