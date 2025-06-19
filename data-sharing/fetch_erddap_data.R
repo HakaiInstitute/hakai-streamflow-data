@@ -31,7 +31,7 @@ tryCatch(
     stop('This is a test error from prov data sharing')
   },
   error = function(e) {
-    capture_sentry_exeptions(e)
+    capture_sentry_exception(e)
     stop(e)
   }
 )
@@ -89,7 +89,7 @@ tryCatch(
     }
   },
   error = function(e) {
-    ccapture_sentry_exception(e)
+    capture_sentry_exception(e)
     log_info("Error:", as.character(e), "\n")
   }
 )
