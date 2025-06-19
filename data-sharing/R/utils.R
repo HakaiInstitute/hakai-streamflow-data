@@ -143,7 +143,7 @@ get_station_measurements <- function(date, station_id) {
 capture_sentry_exception <- function(e) {
   logger::log_info("Creating sentry alert.")
   if (is_main() && is_gha()) {
-    capture_exception(
+    sentryR::capture_exception(
       error = e,
       extra = list(
         run_url = Sys.getenv("GITHUB_RUN_URL"),
@@ -151,6 +151,15 @@ capture_sentry_exception <- function(e) {
       )
     )
   }
+}
+
+
+make_ftp_safe_filename <- function(df, dataset_id) {
+  time_last_pass <- format(min(df$time), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+
+  file_name <- glue::glue("{dataset_id}_since_{time_last_pass}.parquet")
+  ## make ftp safe
+  gsub(":", "-", file_name)
 }
 
 

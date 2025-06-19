@@ -45,14 +45,6 @@ columns <- c(
   "discharge_volume_qc"
 )
 
-make_ftp_safe_filename <- function(df, dataset_id) {
-  time_last_pass <- format(min(df$time), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-
-  file_name <- glue("{dataset_id}_since_{time_last_pass}.parquet")
-  ## make ftp safe
-  gsub(":", "-", file_name)
-}
-
 # Fetch data
 tryCatch(
   {
@@ -65,7 +57,7 @@ tryCatch(
   },
   error = function(e) {
     capture_sentry_exception(e)
-    log_info("Error:", as.character(e), "\n")
+    log_error(as.character(e))
   }
 )
 
@@ -80,6 +72,6 @@ tryCatch(
   },
   error = function(e) {
     capture_sentry_exception(e)
-    log_info("Error:", as.character(e), "\n")
+    log_error(as.character(e))
   }
 )
