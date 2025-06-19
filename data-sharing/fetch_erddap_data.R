@@ -13,7 +13,7 @@ log_info(
 source(here("data-sharing/R/utils.R"))
 
 if (is_gha()) {
-    configure_sentry(
+  configure_sentry(
     dsn = Sys.getenv("SENTRY_DSN"),
     app_name = 'data-sharing',
     app_version = Sys.getenv("GITHUB_SHA"),
@@ -25,7 +25,6 @@ if (is_gha()) {
     )
   )
 }
-
 
 tryCatch(
   {
@@ -57,11 +56,11 @@ columns <- c(
 )
 
 make_ftp_safe_filename <- function(df, dataset_id) {
-    time_last_pass <- format(min(df$time), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-    
-    file_name <- glue("{dataset_id}_since_{time_last_pass}.parquet")
-    ## make ftp safe
-    gsub(":", "-", file_name)
+  time_last_pass <- format(min(df$time), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+
+  file_name <- glue("{dataset_id}_since_{time_last_pass}.parquet")
+  ## make ftp safe
+  gsub(":", "-", file_name)
 }
 
 # Fetch data
@@ -83,13 +82,11 @@ tryCatch(
 
 tryCatch(
   {
-    
     # if (resp$status_code == 226) {
     if (TRUE) {
       log_info(file_name, " successfully transferred")
       record_last_passed_measurements(file_name)
     }
-    
   },
   error = function(e) {
     ccapture_sentry_exception(e)
