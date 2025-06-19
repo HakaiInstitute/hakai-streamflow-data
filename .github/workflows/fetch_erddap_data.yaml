@@ -34,6 +34,7 @@ jobs:
         SENTRY_CRONS: op://EIMS Administrator/prov-data-sharing-sentry/sentry_crons
     
     - name: Notify Sentry - Job Running
+      if: github.event_name != 'pull_request'
       env:
         SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
       run: curl "${SENTRY_CRONS}?status=in_progress"
@@ -80,6 +81,7 @@ jobs:
         retention-days: 30
 
     - name: Notify Sentry - Job Finished
+      if: github.event_name != 'pull_request'
       env:
         SENTRY_CRONS: ${{ steps.op-load-secret.outputs.SENTRY_CRONS }} 
       run: curl "${SENTRY_CRONS}?status=ok"
