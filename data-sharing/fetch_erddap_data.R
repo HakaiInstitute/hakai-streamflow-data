@@ -13,6 +13,7 @@ log_info(
 source(here("data-sharing/R/utils.R"))
 
 if (is_gha()) {
+  logger::log_info("Configuring sentry")
   configure_sentry(
     dsn = Sys.getenv("SENTRY_DSN"),
     app_name = 'data-sharing',
@@ -25,17 +26,6 @@ if (is_gha()) {
     )
   )
 }
-
-tryCatch(
-  {
-    stop('This is a test error from prov data sharing')
-  },
-  error = function(e) {
-    capture_sentry_exception(e)
-    stop(e)
-  }
-)
-
 
 # Configuration
 dataset_id <- "HakaiWatershedsStreamStationsProvisional"
