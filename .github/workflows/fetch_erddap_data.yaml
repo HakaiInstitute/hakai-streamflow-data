@@ -5,6 +5,7 @@ on:
     branches: main
     paths:
       - 'data-sharing/**'
+      - '.github/workflows/fetch_erddap_data.yaml'
   schedule:
    - cron: '0 15 * * *'  # Every 24 hours at 3pm UTC (8am Pacific)
   workflow_dispatch: 
