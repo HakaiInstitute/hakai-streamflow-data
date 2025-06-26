@@ -1,3 +1,5 @@
+[![Fetch ERDDAP data](https://github.com/HakaiInstitute/hakai-streamflow-data/actions/workflows/fetch_erddap_data.yaml/badge.svg)](https://github.com/HakaiInstitute/hakai-streamflow-data/actions/workflows/fetch_erddap_data.yaml)
+
 # Data Sharing - ERDDAP Automated Fetch
 
 This directory contains an automated process for fetching streamflow data from the Hakai Institute's ERDDAP server.
