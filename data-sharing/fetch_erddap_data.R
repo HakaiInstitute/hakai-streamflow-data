@@ -81,5 +81,7 @@ if (FALSE) {
       log_error(as.character(e))
     }
   )
+} else {
+  record_last_passed_measurements(file_name)
 }
 
