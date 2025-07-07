@@ -15,18 +15,28 @@ read_last_measurements <- function() {
   is_present <- file.exists(last_passed_measurements)
 
   if (!is_present) {
-    stop(
-      "No previous measurements file found at: ",
-      last_passed_measurements,
-      call. = FALSE
-    )
+    latest_times <- create_first_measurement()
+  } else {
+    latest_times <- read.csv(last_passed_measurements)
+    latest_times$latest_time <- as.POSIXct(latest_times$latest_time, tz = "UTC")
+    latest_times$record_time <- as.POSIXct(latest_times$record_time, tz = "UTC")
   }
 
-  latest_times <- read.csv(last_passed_measurements)
-  latest_times$latest_time <- as.POSIXct(latest_times$latest_time, tz = "UTC")
-  latest_times$record_time <- as.POSIXct(latest_times$record_time, tz = "UTC")
-
   latest_times
+}
+
+create_first_measurement <- function() {
+  record_time <- as.POSIXct(
+    format(Sys.time(), tz = "UTC"),
+    tz = "UTC"
+  )
+  latest_time <- record_time - 86400
+
+  data.frame(
+    station_id = c("H08KC0626", "H08KC0703", "H08KC0844", "H08KC1015"),
+    record_time = record_time,
+    latest_time = latest_time
+  )
 }
 
 #' Record the latest measurement times for each station
