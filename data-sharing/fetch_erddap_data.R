@@ -4,6 +4,7 @@ library(glue)
 library(nanoparquet)
 library(here)
 library(sentryR)
+library(curl)
 
 Sys.setenv(RERDDAP_DEFAULT_URL = "https://catalogue.hakai.org/erddap/")
 log_info(
