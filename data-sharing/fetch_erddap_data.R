@@ -61,7 +61,7 @@ tryCatch(
   }
 )
 
-if (FALSE) {
+if (is_gha() && is_main()) {
   tryCatch(
     {
       log_info("Uploading ", file_name)
@@ -81,7 +81,5 @@ if (FALSE) {
       log_error(as.character(e))
     }
   )
-} else {
-  record_last_passed_measurements(file_name)
 }
 
