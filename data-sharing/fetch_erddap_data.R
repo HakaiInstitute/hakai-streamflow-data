@@ -68,8 +68,10 @@ if (is_gha() && is_main()) {
       log_info("Uploading ", file_name)
       ftp_url <- Sys.getenv("FTP_URL")
       resp <- curl_upload(
+        file = file_name,
         url = paste0(ftp_url, file_name),
-        file = file_name
+        verbose = FALSE,
+        reuse = FALSE
       )
 
       if (resp$status_code >= 200 && resp$status_code < 300) {
