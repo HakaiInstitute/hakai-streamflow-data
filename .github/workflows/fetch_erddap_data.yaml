@@ -75,7 +75,6 @@ jobs:
         file_pattern: "data-sharing/last_passed_measurements.csv"
 
     - name: Upload parquet file
-      if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
         name: upload parquet
