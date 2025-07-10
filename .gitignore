@@ -1,5 +1,5 @@
 *.csv
 *.parquet
 
-!hakai-id-mapping.csv
+!data_dictionary.csv
 !last_passed_measurements.csv
