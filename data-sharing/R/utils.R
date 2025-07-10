@@ -100,12 +100,15 @@ remember_min_last_passed_measurement <- function() {
 #'
 #' @param last_measurements Data frame with columns 'station_id' and 'latest_time'
 #'   as returned by \code{read_last_measurements()}
+#' @param dataset_id erddap id
+#' @param columns a vector of columns to select
 #' @return Data frame containing combined measurement data from all stations
-fetch_station_data <- function(last_measurements) {
+fetch_station_data <- function(last_measurements, dataset_id, columns) {
   station_data_list <- mapply(
     get_station_measurements,
     last_measurements$latest_time,
     last_measurements$station_id,
+    MoreArgs = list(dataset_id = dataset_id, columns = columns),
     SIMPLIFY = FALSE
   )
 
@@ -120,9 +123,11 @@ fetch_station_data <- function(last_measurements) {
 #'
 #' @param date POSIXct or character. Start date/time for data retrieval
 #' @param station_id Character. Station identifier to query
+#' @param dataset_id erddap id
+#' @param columns a vector of columns to select
 #' @return Data frame containing measurement data for the specified station,
 #'   or NULL if query fails
-get_station_measurements <- function(date, station_id) {
+get_station_measurements <- function(date, station_id, dataset_id, columns) {
   time_param <- glue::glue("last_updated_lvl_time>={date}")
   station_id_param <- glue::glue('station_id="{station_id}"')
 

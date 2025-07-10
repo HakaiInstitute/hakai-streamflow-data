@@ -13,21 +13,6 @@ log_info(
 
 source(here("data-sharing/R/utils.R"))
 
-if (is_gha()) {
-  logger::log_info("Configuring sentry")
-  configure_sentry(
-    dsn = Sys.getenv("SENTRY_DSN"),
-    app_name = 'data-sharing',
-    app_version = Sys.getenv("GITHUB_SHA"),
-    environment = 'ci',
-    tags = list(
-      repository = Sys.getenv("GITHUB_REPOSITORY"),
-      branch = Sys.getenv("GITHUB_REF_NAME"),
-      workflow = Sys.getenv("GITHUB_WORKFLOW")
-    )
-  )
-}
-
 # Configuration
 dataset_id <- "HakaiWatershedsStreamStationsProvisional"
 
@@ -46,11 +31,27 @@ columns <- c(
   "discharge_volume_qc"
 )
 
+if (is_gha()) {
+  logger::log_info("Configuring sentry")
+  configure_sentry(
+    dsn = Sys.getenv("SENTRY_DSN"),
+    app_name = 'data-sharing',
+    app_version = Sys.getenv("GITHUB_SHA"),
+    environment = 'ci',
+    tags = list(
+      repository = Sys.getenv("GITHUB_REPOSITORY"),
+      branch = Sys.getenv("GITHUB_REF_NAME"),
+      workflow = Sys.getenv("GITHUB_WORKFLOW")
+    )
+  )
+}
+
+
 # Fetch data
 tryCatch(
   {
     last_measurements <- read_last_measurements()
-    station_data <- fetch_station_data(last_measurements)
+    station_data <- fetch_station_data(last_measurements, dataset_id, columns)
     file_name <- make_ftp_safe_filename(station_data, dataset_id)
     write_parquet(station_data, file_name)
 
@@ -85,4 +86,3 @@ if (is_gha() && is_main()) {
     }
   )
 }
-
