@@ -128,7 +128,7 @@ fetch_station_data <- function(last_measurements, dataset_id, columns) {
 #' @return Data frame containing measurement data for the specified station,
 #'   or NULL if query fails
 get_station_measurements <- function(date, station_id, dataset_id, columns) {
-  time_param <- glue::glue("last_updated_lvl_time>={date}")
+  time_param <- glue::glue("last_updated_stage_time>={date}")
   station_id_param <- glue::glue('station_id="{station_id}"')
 
   logger::log_info(
