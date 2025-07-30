@@ -18,6 +18,9 @@ on:
 jobs:
   data-comparison:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-sharing
     
     steps:
     - name: Checkout repository
@@ -41,4 +44,4 @@ jobs:
     
     - name: Run data comparison
       run: |
-        Rscript data-sharing/R/comparison.R
+        Rscript R/comparison.R
