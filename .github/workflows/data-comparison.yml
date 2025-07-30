@@ -44,5 +44,4 @@ jobs:
     
     - name: Run data comparison
       run: |
-        pwd
-        Rscript R/comparison.R
+        Rscript R/comparisons.R
