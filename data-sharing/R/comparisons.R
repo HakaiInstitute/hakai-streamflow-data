@@ -2,6 +2,8 @@ library(dplyr)
 library(lubridate)
 library(logger)
 
+log_info("Working directory:", getwd())
+
 source("R/aquarius-utils.R")
 source("R/utils.R")
 
