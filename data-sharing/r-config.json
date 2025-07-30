@@ -9,6 +9,7 @@
         "any::here",
         "any::sentryR",
         "any::curl",
-        "any::httr2"
+        "any::httr2",
+        "any::readr",
     ]
 }
