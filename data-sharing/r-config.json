@@ -8,6 +8,7 @@
         "any::nanoparquet",
         "any::here",
         "any::sentryR",
-        "any::curl"
+        "any::curl",
+        "any::httr2"
     ]
 }
