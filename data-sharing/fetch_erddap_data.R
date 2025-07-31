@@ -51,7 +51,12 @@ if (is_gha()) {
 tryCatch(
   {
     last_measurements <- read_last_measurements()
-    station_data <- fetch_station_data(last_measurements, dataset_id, columns)
+    station_data <- fetch_station_data(
+      last_measurements,
+      dataset_id,
+      columns
+    ) |>
+      correct_stage_status_values()
     file_name <- make_ftp_safe_filename(station_data, dataset_id)
     write_parquet(station_data, file_name)
 
