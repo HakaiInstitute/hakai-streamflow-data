@@ -192,7 +192,7 @@ correct_stage_status_values <- function(.data) {
   # to the stage values
 
   condition <- .data$station_id %in%
-    c("H08KC0703", "H08KC1015") &
+    c("H08KC1015") &
     .data$time > lubridate::ymd_hms("2025-07-06 19:00:00") &
     .data$time <= lubridate::ymd_hms("2025-07-09 15:10:16")
   .data$last_updated_stage_status[condition] <- "updated"
