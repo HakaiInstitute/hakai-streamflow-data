@@ -77,7 +77,7 @@ compare_stations <- function(stn_numbers, parameter = "Discharge") {
   }
 
   # Print results table
-  cat("\nStation Comparison Results:\n")
+  cat(paste0("\n", parameter, " Comparison Results:\n"))
   cat("=========================\n")
   for (i in 1:nrow(results)) {
     cat(sprintf("%-12s: %s\n", results$station_number[i], results$status[i]))
@@ -99,4 +99,14 @@ compare_stations <- function(stn_numbers, parameter = "Discharge") {
   return(results)
 }
 
-result <- compare_stations(c("H08KC0626", "H08KC0844"))
+
+stations_currently_checking <- read_last_measurements()$station_id
+
+discharge_result <- compare_stations(
+  stations_currently_checking,
+  parameter = "Discharge"
+)
+stage_result <- compare_stations(
+  stations_currently_checking,
+  parameter = "Stage"
+)
