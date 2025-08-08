@@ -2,11 +2,11 @@
 
 # Data Sharing - ERDDAP Automated Fetch
 
-This directory contains an automated process for fetching streamflow data from the Hakai Institute's ERDDAP server.
+This directory contains scripts that are run as an automated process for fetching streamflow data from the Hakai Institute's ERDDAP server.
 
 ## What it does
 
-The system automatically retrieves the latest provisional stream station data (water levels) from Hakai's watersheds monitoring network.
+The system automatically retrieves the latest provisional stream station data (water levels) from Hakai's sensor monitoring network.
 
 ## Components
 
