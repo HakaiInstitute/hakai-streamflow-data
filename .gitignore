@@ -1,5 +1,9 @@
 *.csv
 *.parquet
+*.html
+*.pdf
+qc-stage-values_cache
+qc-stage-values_files
 
 !data_dictionary.csv
 !last_passed_measurements.csv
