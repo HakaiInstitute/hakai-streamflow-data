@@ -39,7 +39,7 @@ get_historical_erddap_data <- function(station_id, date) {
   file <- rerddap::tabledap(
     "HakaiWatershedsStreamStationsProvisional",
     fields = columns,
-    store = disk(glue::glue("historical-data/")),
+    store = disk(glue::glue("data-sharing/historical-data/")),
     fmt = 'parquet',
     time_param,
     station_id_param
@@ -65,10 +65,36 @@ library(dplyr)
 library(arrow)
 
 open_dataset("historical-data/") |>
-  group_by(station_id) |>
+  mutate(file = add_filename()) |>
+  group_by(station_id, file, latitude, longitude) |>
   summarise(
     n = n(),
     first_time = min(time),
-    last_time = max(time)
+    last_time = max(time),
   ) |>
-  collect()
+  collect() |>
+  ungroup() |>
+  mutate(file = basename(file)) |>
+  arrange(station_id) |>
+  gt::gt()
+
+## send along to FTP server
+ftp_upload <- function(file_name) {
+  ftp_url <- Sys.getenv("FTP_URL")
+  ftp_url_plus_name <- paste0(ftp_url, basename(file_name))
+  resp <- curl::curl_upload(
+    file = file_name,
+    url = ftp_url_plus_name,
+    verbose = TRUE,
+    reuse = FALSE
+  )
+  resp
+}
+
+ftp_upload("historical-data/historical-H08KC0626.parquet")
+ftp_upload("historical-data/historical-H08KC0693.parquet")
+ftp_upload("historical-data/historical-H08KC0703.parquet")
+ftp_upload("historical-data/historical-H08KC0708.parquet")
+ftp_upload("historical-data/historical-H08KC0819.parquet")
+ftp_upload("historical-data/historical-H08KC0844.parquet")
+ftp_upload("historical-data/historical-H08KC1015.parquet")

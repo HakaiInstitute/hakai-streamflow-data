@@ -1,0 +1,163 @@
+---
+title: "Untitled"
+format: typst
+---
+
+## Issue
+
+Many years of hydrometric data have discharge values and no corresponding stage value.
+
+```{r}
+library(rerddap)
+library(glue)
+library(dplyr, warn.conflicts = FALSE)
+library(lubridate, warn.conflicts = FALSE)
+library(ggplot2)
+Sys.setenv(RERDDAP_DEFAULT_URL = "https://catalogue.hakai.org/erddap/")
+columns <- c(
+  "station_id",
+  "time",
+  "stage",
+  "stage_ql",
+  "stage_qc",
+  "discharge_rate",
+  "discharge_volume_ql",
+  "discharge_volume_qc"
+)
+
+get_stn_data <- function(station_id) {
+    dataset_id <- "HakaiWatershedsStreamStationsProvisional"
+    station_id_param <- glue::glue('station_id="{station_id}"')
+    dat_raw <- tabledap(
+      dataset_id,
+      fields = columns,
+      station_id_param
+    )
+    dat <- dat_raw |>
+      as_tibble() |>
+      mutate(
+        status = case_when(
+          is.na(stage) & !is.na(discharge_rate) ~ "Discharge without Stage",
+          !is.na(stage) & is.na(discharge_rate) ~ "Stage without Discharge",
+          !is.na(stage) & !is.na(discharge_rate) ~ "Stage and Discharge",
+          is.na(stage) & is.na(discharge_rate) ~ "No Stage or Discharge",
+          TRUE ~ "Unknown combination"
+        )
+      ) |>
+      mutate(year = year(time))
+    dat
+}
+```
+
+## Station H08KC1015 Data
+
+- For `SSN1015`, post 2019-09-09 11:00:00 should have been taken care of by this commit: https://github.com/HakaiInstitute/hakai-sensor-network/commit/a51cd5e87a6ce9a9f82b564d65609d4f0700e7da. However that is not the case as the `stage_avg` value is missing from before that date for most values.   
+
+
+```{r get-data}
+#| cache: true
+dat0626 <- get_stn_data("H08KC0626")
+Sys.sleep(1) 
+print("H08KC0626 done")
+dat0693 <- get_stn_data("H08KC0693")
+Sys.sleep(1) 
+print("H08KC0693 done")
+dat0703 <- get_stn_data("H08KC0703")
+Sys.sleep(1) 
+dat0708 <- get_stn_data("H08KC0708")
+Sys.sleep(1) 
+dat0819 <- get_stn_data("H08KC0819")
+Sys.sleep(1) 
+dat0844 <- get_stn_data("H08KC0819")
+Sys.sleep(1) 
+dat1015 <- get_stn_data("H08KC1015")
+Sys.sleep(1) 
+```
+
+## OVerview
+
+```{r}
+dat <- dat0626 |> 
+  bind_rows(dat0693) |>
+  bind_rows(dat0703) |>
+  bind_rows(dat0708) |>
+  bind_rows(dat0819) |>
+  bind_rows(dat0844) |>
+  bind_rows(dat1015)
+
+alldat <- dat |> 
+  count(station_id, year, status) |> 
+  mutate(year = factor(year))
+
+
+alldat |> 
+  # filter(n > 100) |> 
+  filter(status == "Discharge without Stage") |>
+  ggplot(aes(y = year, x = n, fill = station_id)) +
+  geom_col() +
+  facet_grid(vars(station_id)) +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Number of Observations with discharge rate data and no stage data (removing <100 observations)",
+    x = "Number of Observations",
+    y = "Year"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+dat1015 |>
+  filter(year == 2019) |>
+  ggplot(aes(x = time, y = discharge_rate, colour = status)) +
+  geom_point(size = 0.1) +
+  facet_wrap(vars(year), scales = "free_x", ncol = 1) +
+  scale_x_datetime(date_labels = "%b-%d", date_breaks = "2 month") +
+  labs(
+    title = "Discharge Rate for Station H08KC1015",
+    x = "Time",
+    y = "Discharge Rate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+- For SSN1015 all values that have stage and discharge in the pre-2019 period have the qc flag: “Offset PLS to match PLS2”. 
+
+```{r}
+dat1015 |>
+  filter(time <= ymd_hms("2019-09-09 11:00:00")) |>
+  filter(status == "Stage and Discharge") |> 
+  distinct(stage_qc)
+```
+
+## Station H08KC0819 Data
+
+```{r}
+dat0819 |> 
+  count(status, year)
+```
+
+```{r}
+dat0819 |>
+  filter(year == 2016) |>
+  ggplot(aes(x = time, y = discharge_rate, colour = status)) +
+  geom_point(size = 0.1) +
+  facet_wrap(vars(year), scales = "free_x", ncol = 1) +
+  scale_x_datetime(date_labels = "%b-%d", date_breaks = "2 month") +
+  labs(
+    title = "Discharge Rate for Station H08KC0819",
+    x = "Time",
+    y = "Discharge Rate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+- For SSN1015 all values that have stage and discharge in the pre-2019 period have the qc flag: “Offset PLS to match PLS2”. 
+
+```{r}
+dat1015 |>
+  filter(time <= ymd_hms("2019-09-09 11:00:00")) |>
+  filter(status == "Stage and Discharge") |> 
+  distinct(stage_qc)
+```
