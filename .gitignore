@@ -7,3 +7,4 @@ qc-stage-values_files
 
 !data_dictionary.csv
 !last_passed_measurements.csv
+.Rproj.user
