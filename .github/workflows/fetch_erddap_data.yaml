@@ -75,17 +75,16 @@ jobs:
       with:
         commit_message: "Recording last passed measurements"
         file_pattern: "data-sharing/last_passed_measurements.csv"
-        branch: auto-data-update
+        branch: auto-data-update-${{ github.run_id }}
         create_branch: true
-        token: ${{ secrets.BOSHEK_PAT }}
 
     - name: Merge data update to main
       if: github.event_name != 'pull_request' && steps.auto-commit.outputs.changes_detected == 'true'
       env:
         GH_TOKEN: ${{ secrets.BOSHEK_PAT }}
       run: |
-        gh pr create --base main --head auto-data-update --title "Recording last passed measurements" --body "Automated data update"
-        gh pr merge auto-data-update --merge --delete-branch
+        gh pr create --base main --head auto-data-update-${{ github.run_id }} --title "Recording last passed measurements" --body "Automated data update"
+        gh pr merge auto-data-update-${{ github.run_id }} --merge --delete-branch
 
     - name: Upload parquet file
       uses: actions/upload-artifact@v4
