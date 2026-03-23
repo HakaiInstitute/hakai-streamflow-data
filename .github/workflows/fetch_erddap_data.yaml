@@ -73,6 +73,7 @@ jobs:
       with:
         commit_message: "Recording last passed measurements"
         file_pattern: "data-sharing/last_passed_measurements.csv"
+        token: ${{ secrets.BOSHEK_PAT }}
 
     - name: Upload parquet file
       uses: actions/upload-artifact@v4
