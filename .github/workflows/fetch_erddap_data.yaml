@@ -85,7 +85,7 @@ jobs:
         GH_TOKEN: ${{ secrets.BOSHEK_PAT }}
       run: |
         gh pr create --base main --head auto-data-update --title "Recording last passed measurements" --body "Automated data update"
-        gh pr merge auto-data-update --merge --delete-branch --yes
+        gh pr merge auto-data-update --merge --delete-branch
 
     - name: Upload parquet file
       uses: actions/upload-artifact@v4
