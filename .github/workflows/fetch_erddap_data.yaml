@@ -81,7 +81,7 @@ jobs:
     - name: Merge data update to main
       if: github.event_name != 'pull_request' && steps.auto-commit.outputs.changes_detected == 'true'
       env:
-        GH_TOKEN: ${{ secrets.BOSHEK_PAT }}
+        GH_TOKEN: ${{ secrets.CI_TOKEN }}
       run: |
         gh pr create --base main --head auto-data-update-${{ github.run_id }} --title "Recording last passed measurements" --body "Automated data update"
         gh pr merge auto-data-update-${{ github.run_id }} --merge --delete-branch
