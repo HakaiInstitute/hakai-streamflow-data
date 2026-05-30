@@ -1,0 +1,687 @@
+---
+title: "SSN703 Rating Curve Development -- v5"
+author: "[Emily Haughton]"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+
+library(tidyverse)
+library(plotly)
+library(segmented)
+library(stats)
+library(KScorrect)
+
+select <- dplyr::select
+
+source("02_processing/scripts/selectspan.R")
+source("02_processing/scripts/interp1.R")
+source("02_processing/scripts/interp2.R")
+source("02_processing/scripts/HQ_unc.R")
+source("02_processing/scripts/CI_model_input.R")
+source("02_processing/scripts/CI.R")
+
+out_dir <- "04_outputs"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+n_boot <- 500
+```
+
+```{r load_data, include=FALSE}
+# NOTE: Stage_avg = Stage_avg_corrected throughout this script
+# renamed for compatibility with colleague's source functions
+
+gaugings_all <- read_csv("03_docs/metadata/ssn703_gaugings_prepped.csv") |>
+  filter(!is.na(Q_meas)) |>
+  mutate(
+    Stage_avg = Stage_avg_corrected,
+    Q_abs_unc = Q_rel_unc / 100 * Q_meas,
+    datetime  = as.Date(datetime)
+  )
+
+# Previous lookup table -- for context/diagnostic only
+# Discharge record pre-2019-02-09 is already in the database and not touched
+ratingcurve_v4 <- read_csv("03_docs/metadata/ssn703_RC1_lookup_v_previous.csv")
+rc_v4_r3 <- ratingcurve_v4 |> filter(Rating == 3) |> dplyr::select(Stage_avg, Q_model)
+
+# RC2 -- loc_2, sensor C
+# Start date for applied curve: 2019-02-09 (last date covered by previous pipeline)
+# All gaugings with ok stage; exclude WY 2020-2021 (sparse/biased)
+HQ_RC2 <- gaugings_all |>
+  filter(rating_curve_period == "RC2",
+         stage_status == "ok",
+         WY != "2020-2021",
+         Old_New == "New",
+         Final_rating_curve == "Y")
+
+HQ_RC2_old <- HQ_RC2 |> filter(Old_New == "Old")
+HQ_RC2_new <- HQ_RC2 |> filter(Old_New == "New")
+
+# RC3 -- loc_3, sensor D; all New
+# Event 63 rising limb at ~121cm excluded (physically implausible vs neighbours)
+HQ_RC3 <- gaugings_all |>
+  filter(rating_curve_period == "RC3",
+         stage_status == "ok",
+         Old_New == "New",
+         Final_rating_curve == "Y") |>
+  filter(!(Event_no == 63 & Stage_avg > 120 & Stage_avg < 122))
+```
+
+---
+
+## Background
+
+The discharge record for SSN703 up to **2019-02-09** is already computed and stored in the database using the previous pipeline (v4, Ratings 1-3). That record is not touched here.
+
+This document develops two new rating curves covering the period from 2019-02-09 onward:
+
+| Rating | Sensor | Location | Applied from | Notes |
+|:-------|:-------|:---------|:-------------|:------|
+| RC2 | ssn703_c | loc_2 | 2019-02-09 | New location; previous pipeline never incorporated sensor C |
+| RC3 | ssn703_d | loc_3 | 2023-09-15 | New location; sensor D installed 2021-09-02 |
+
+**Key decisions:**
+
+- Stage_avg throughout = Stage_avg_corrected from the prepped gauging table
+- WY 2020-2021 excluded from RC2 due to sparse and biased stage coverage
+- Stage_suspect window (2023-06-25 to 2023-09-15) excluded -- ssn703_c stage bad before db updated to ssn703_d
+- Old/New in plots: Old = gaugings collected before 2019-02-09; New = post 2019-02-09
+- RC3 Event 63 rising limb gauging at ~121cm excluded (physically implausible vs neighbours)
+
+---
+
+## Diagnostic -- RC2 gaugings vs previous Rating 3 curve
+
+_Early RC2 gaugings (loc_2, sensor C) plotted against the last active previous curve (v4 Rating 3, loc_1 sensor B). This confirms that loc_2 produces a systematically different stage-discharge relationship and justifies starting a new curve._
+
+```{r diagnostic}
+HQ_RC2_diag <- gaugings_all |>
+  filter(rating_curve_period == "RC2",
+         stage_status == "ok",
+         Old_New == "New")
+
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r3,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "black", linetype = "dashed") +
+    geom_pointrange(data = HQ_RC2_diag,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        colour = Final_rating_curve,
+                        label = paste0("Event: ", Event_no,
+                                       " | Date: ", datetime,
+                                       " | Q: ", round(Q_meas, 3))),
+                    size = 0.5) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 gaugings vs previous Rating 3 curve",
+         subtitle = "Dashed = v4 Rating 3 (last active previous curve)",
+         colour = "Final rating curve",
+         caption = "Y = used for fitting; N = excluded")
+)
+```
+
+---
+
+## RC2 -- loc_2 (2019-02-09 onward) {.tabset}
+
+_`r nrow(HQ_RC2)` gaugings used for RC2 (`r nrow(HQ_RC2_old)` Old / `r nrow(HQ_RC2_new)` New). No previous curve for this location. WY 2020-2021 excluded._
+
+### Data assessment {.tabset}
+
+#### Overview
+
+```{r rc2_overview}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC2,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = Old_New,
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- all gaugings (Old vs New)",
+         fill = "Old/New",
+         caption = "Old = available to previous pipeline but unused; New = post 2019-02-09")
+)
+```
+
+#### By water year
+
+```{r rc2_wy}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC2,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(WY),
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- gaugings by water year", fill = "Water year")
+)
+```
+
+#### With uncertainty
+
+```{r rc2_unc}
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC2,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        colour = Old_New,
+                        label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                       " | Q: ", round(Q_meas, 3))),
+                    size = 0.5) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- gaugings with uncertainty", colour = "Old/New")
+)
+```
+
+#### By event
+
+```{r rc2_event}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC2,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(Event_no),
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- gaugings by event", fill = "Event no.")
+)
+```
+
+#### Hysteresis
+
+```{r rc2_hyst}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC2,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = Stage_delta,
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- hysteresis assessment", fill = "Stage delta (R/F/C)")
+)
+```
+
+### LOESS span selection
+
+```{r rc2_span}
+Rating_RC2 <- selectspan(HQ_RC2, 0.3, 0.4, 0.5)
+
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC2,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        label = Event_no),
+                    size = 0.5) +
+    geom_line(data = Rating_RC2,
+              aes(x = Stage_avg, y = Q_model, colour = smoothed)) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- LOESS span selection")
+)
+```
+
+```{r rc2_span_choose, include=FALSE}
+## ACTION REQUIRED: enter chosen span label and value
+RC2_span_label <- "span_b"
+RC2_span_value <- 0.4
+
+Rating_RC2 <- Rating_RC2 |>
+  filter(smoothed == RC2_span_label) |>
+  dplyr::select(Stage_avg, Q_model)
+```
+
+### Extrapolation and final curve
+
+```{r rc2_extrap, include=FALSE}
+h0_RC2 <- min(HQ_RC2$Stage_avg[HQ_RC2$Q_meas > 0], na.rm = TRUE) * 0.9
+
+## ACTION REQUIRED: set inflection point manually
+## Power law fitted only on gaugings at or above this stage
+inflection_h_RC2 <- 150
+
+# Derive starting values from log-log linear model on upper data
+RC2_extrap_data <- HQ_RC2 |> filter(Stage_avg >= inflection_h_RC2, Q_meas > 0)
+RC2_loglog      <- RC2_extrap_data |>
+  mutate(log_h = log(Stage_avg - h0_RC2), log_Q = log(Q_meas))
+lm_start_RC2 <- lm(log_Q ~ log_h, data = RC2_loglog)
+a_start_RC2  <- exp(coef(lm_start_RC2)[1])
+b_start_RC2  <- coef(lm_start_RC2)[2]
+
+fit_RC2 <- tryCatch(
+  nls(Q_meas ~ a * (Stage_avg - h0)^b,
+      data    = RC2_extrap_data,
+      start   = list(a = a_start_RC2, b = b_start_RC2, h0 = h0_RC2),
+      control = nls.control(maxiter = 500)),
+  error = function(e) {
+    message("RC2 nls failed with free h0 -- falling back to fixed h0")
+    nls(Q_meas ~ a * (Stage_avg - h0_RC2)^b,
+        data    = RC2_extrap_data,
+        start   = list(a = a_start_RC2, b = b_start_RC2),
+        control = nls.control(maxiter = 500))
+  }
+)
+
+# Anchor power law to last LOESS value so the join is smooth
+RC2_max_loess    <- max(Rating_RC2$Stage_avg)
+RC2_Q_at_anchor  <- Rating_RC2 |>
+  filter(Stage_avg == RC2_max_loess) |>
+  pull(Q_model)
+
+# Rescale power law predictions to pass through the LOESS anchor point
+RC2_Q_pl_at_anchor <- predict(fit_RC2,
+                               newdata = data.frame(Stage_avg = RC2_max_loess))
+RC2_pl_scale <- RC2_Q_at_anchor / RC2_Q_pl_at_anchor
+
+RC2_extrap_stage  <- seq(RC2_max_loess + 1, 218, by = 1)
+RC2_extrap_Q      <- predict(fit_RC2,
+                              newdata = data.frame(Stage_avg = RC2_extrap_stage)) * RC2_pl_scale
+RC2_extrap_values <- tibble(Stage_avg = RC2_extrap_stage, Q_model = RC2_extrap_Q)
+Rating_RC2_full   <- bind_rows(Rating_RC2, RC2_extrap_values) |> arrange(Stage_avg)
+
+RC2_params <- coef(fit_RC2)
+```
+
+_RC2 h₀ = `r round(h0_RC2, 1)` cm | Inflection = `r round(inflection_h_RC2, 1)` cm | Power law anchored at LOESS endpoint (`r round(RC2_max_loess, 1)` cm, `r round(RC2_Q_at_anchor, 2)` m³/s) | a = `r round(RC2_params["a"], 4)`, b = `r round(RC2_params["b"], 4)`_
+
+```{r rc2_extrap_plot}
+ggplotly(
+  ggplot() +
+    geom_vline(xintercept = inflection_h_RC2, linetype = "dotted", colour = "grey50") +
+    geom_line(data = Rating_RC2_full,
+              aes(x = Stage_avg, y = Q_model,
+                  colour = Stage_avg > RC2_max_loess)) +
+    geom_point(data = HQ_RC2,
+               aes(x = Stage_avg, y = Q_meas,
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime)),
+               colour = ifelse(HQ_RC2$Stage_avg >= inflection_h_RC2, "#E07B54", "black"),
+               size = 2) +
+    scale_colour_manual(values = c("FALSE" = "black", "TRUE" = "red"),
+                        labels = c("LOESS", "Power law extrapolation")) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC2 -- LOESS fit with anchored power law extrapolation",
+         subtitle = paste0("Dotted line = inflection (", round(inflection_h_RC2, 1),
+                           " cm). Orange = used for power law fit. Power law rescaled to LOESS at ",
+                           round(RC2_max_loess, 1), " cm."),
+         colour = "Fit type")
+)
+```
+
+```{r rc2_interp, include=FALSE}
+Rating_RC2_interp <- interp1(Rating_RC2_full)
+names(Rating_RC2_interp) <- c("Stage_avg", "Q_model")
+```
+
+```{r rc2_ci, include=FALSE}
+HQ_RC2_unc   <- HQ_unc(HQ_RC2, Rating_RC2, Rating_RC2_interp)
+CI_input_RC2 <- CI_model_input(HQ_RC2_unc, n_boot, HQ_RC2)
+CI_RC2       <- CI(CI_input_RC2, n_boot, RC2_span_value, 1)
+RatingCI_RC2 <- bind_cols(Rating_RC2, CI_RC2)
+
+RC2_extrap_CI <- RC2_extrap_values |>
+  mutate(Max_CI = Q_model * 1.05, Min_CI = Q_model * 0.95)
+
+RatingCI_RC2_full   <- bind_rows(RatingCI_RC2, RC2_extrap_CI) |> arrange(Stage_avg)
+RatingCI_RC2_interp <- interp2(RatingCI_RC2_full)
+```
+
+```{r rc2_final_plot}
+Q_meas_RC2 <- cbind(HQ_RC2$Stage_avg, HQ_RC2_unc)
+colnames(Q_meas_RC2)[1] <- "Stage_avg"
+
+ggplotly(
+  ggplot() +
+    geom_ribbon(data = RatingCI_RC2_interp,
+                aes(x = Stage_avg, ymin = Min_CI, ymax = Max_CI),
+                fill = "grey80") +
+    geom_pointrange(data = Q_meas_RC2,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_min, ymax = Q_max),
+                    size = 0.5) +
+    geom_line(data = RatingCI_RC2_interp,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "#333333") +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN703 RC2 -- Final rating curve v1")
+)
+```
+
+```{r rc2_save, include=FALSE}
+RC2_lookup <- RatingCI_RC2_interp |>
+  mutate(
+    Start  = format(as.Date("2019-02-09"), "%m/%d/%Y %H:%M"),
+    Rating = 4L
+  ) |>
+  dplyr::select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating)
+
+write_csv(RC2_lookup, file.path(out_dir, "ssn703_RC2_rating_curve_v1.csv"))
+write_csv(HQ_RC2,    file.path(out_dir, "ssn703_RC2_stagedischarge_v1.csv"))
+```
+
+---
+
+## RC3 -- loc_3 (2023-09-15 onward) {.tabset}
+
+_`r nrow(HQ_RC3)` gaugings used for RC3. All New -- sensor D at loc_3 entirely post-dates the previous pipeline. No previous curve for this location. **Caution: sparse data.**_
+
+### Data assessment {.tabset}
+
+#### Overview
+
+```{r rc3_overview}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC3,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(WY),
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC3 -- all gaugings by water year",
+         fill = "Water year",
+         caption = "Caution: sparse data")
+)
+```
+
+#### With uncertainty
+
+```{r rc3_unc}
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC3,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        colour = factor(WY),
+                        label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                       " | Q: ", round(Q_meas, 3))),
+                    size = 0.5) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC3 -- gaugings with uncertainty by water year",
+         colour = "Water year")
+)
+```
+
+#### Hysteresis
+
+```{r rc3_hyst}
+ggplotly(
+  ggplot() +
+    geom_point(data = HQ_RC3,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = Stage_delta,
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC3 -- hysteresis assessment", fill = "Stage delta (R/F/C)")
+)
+```
+
+### LOESS span selection
+
+```{r rc3_span}
+Rating_RC3 <- selectspan(HQ_RC3, 0.5, 0.6, 0.7)
+
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC3,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        label = Event_no),
+                    size = 0.5) +
+    geom_line(data = Rating_RC3,
+              aes(x = Stage_avg, y = Q_model, colour = smoothed)) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC3 -- LOESS span selection (retained for documentation only)",
+         caption = "Final curve uses full power law -- see below")
+)
+```
+
+```{r rc3_span_choose, include=FALSE}
+## Retained for documentation -- LOESS not used for final RC3 curve
+RC3_span_label <- "span_b"
+RC3_span_value <- 0.60
+
+Rating_RC3 <- Rating_RC3 |>
+  filter(smoothed == RC3_span_label) |>
+  dplyr::select(Stage_avg, Q_model)
+```
+
+```{r rc3_loess_full, include=FALSE}
+# Build full LOESS curve for comparison plot
+RC3_loess_stage <- seq(min(HQ_RC3$Stage_avg), max(HQ_RC3$Stage_avg), by = 0.5)
+RC3_loess_Q     <- predict(loess(Q_meas ~ Stage_avg, data = HQ_RC3,
+                                  span = RC3_span_value),
+                            newdata = data.frame(Stage_avg = RC3_loess_stage))
+Rating_RC3_full <- tibble(Stage_avg = RC3_loess_stage, Q_model = RC3_loess_Q)
+```
+
+### Power law fit comparison
+
+_Given sparse data, a fully parametric power law fit is compared against the LOESS._
+
+```{r rc3_powerlaw}
+h0_RC3_pl <- min(HQ_RC3$Stage_avg[HQ_RC3$Q_meas > 0], na.rm = TRUE) * 0.9
+
+RC3_pl_loglog <- HQ_RC3 |>
+  filter(Stage_avg > h0_RC3_pl, Q_meas > 0) |>
+  mutate(log_h = log(Stage_avg - h0_RC3_pl), log_Q = log(Q_meas))
+
+lm_pl_RC3  <- lm(log_Q ~ log_h, data = RC3_pl_loglog)
+a_pl_start <- exp(coef(lm_pl_RC3)[1])
+b_pl_start <- coef(lm_pl_RC3)[2]
+
+fit_RC3_pl <- tryCatch(
+  nls(Q_meas ~ a * (Stage_avg - h0)^b,
+      data    = HQ_RC3 |> filter(Stage_avg > h0_RC3_pl, Q_meas > 0),
+      start   = list(a = a_pl_start, b = b_pl_start, h0 = h0_RC3_pl),
+      control = nls.control(maxiter = 500)),
+  error = function(e) {
+    message("RC3 power law failed with free h0 -- falling back to fixed h0")
+    nls(Q_meas ~ a * (Stage_avg - h0_RC3_pl)^b,
+        data    = HQ_RC3 |> filter(Stage_avg > h0_RC3_pl, Q_meas > 0),
+        start   = list(a = a_pl_start, b = b_pl_start),
+        control = nls.control(maxiter = 500))
+  }
+)
+
+RC3_pl_stage  <- seq(min(HQ_RC3$Stage_avg), 218, by = 0.1)
+RC3_pl_Q      <- predict(fit_RC3_pl, newdata = data.frame(Stage_avg = RC3_pl_stage))
+RC3_pl_curve  <- tibble(Stage_avg = RC3_pl_stage, Q_model = RC3_pl_Q)
+RC3_pl_params <- coef(fit_RC3_pl)
+
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC3,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        label = paste0("Event: ", Event_no, " | Date: ", datetime)),
+                    size = 0.5) +
+    geom_line(data = Rating_RC3_full,
+              aes(x = Stage_avg, y = Q_model, colour = "LOESS"),
+              linewidth = 1) +
+    geom_line(data = RC3_pl_curve,
+              aes(x = Stage_avg, y = Q_model, colour = "Full power law"),
+              linewidth = 1, linetype = "dashed") +
+    scale_colour_manual(values = c("LOESS" = "black", "Full power law" = "#E07B54")) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "RC3 -- LOESS vs full power law fit",
+         subtitle = paste0("Power law: a = ", round(RC3_pl_params["a"], 4),
+                           ", b = ", round(RC3_pl_params["b"], 4),
+                           ", h0 = ", round(RC3_pl_params["h0"], 1), " cm"),
+         colour = "Fit type")
+)
+```
+
+### Power law fit -- final curve
+
+_Full power law Q = a(h - h0)^b fitted on all RC3 gaugings. CI = ±10% throughout._
+
+```{r rc3_final, include=FALSE}
+h0_RC3_pl <- min(HQ_RC3$Stage_avg[HQ_RC3$Q_meas > 0], na.rm = TRUE) * 0.9
+
+RC3_pl_loglog <- HQ_RC3 |>
+  filter(Stage_avg > h0_RC3_pl, Q_meas > 0) |>
+  mutate(log_h = log(Stage_avg - h0_RC3_pl), log_Q = log(Q_meas))
+
+lm_pl_RC3  <- lm(log_Q ~ log_h, data = RC3_pl_loglog)
+a_pl_start <- exp(coef(lm_pl_RC3)[1])
+b_pl_start <- coef(lm_pl_RC3)[2]
+
+fit_RC3_pl <- tryCatch(
+  nls(Q_meas ~ a * (Stage_avg - h0)^b,
+      data    = HQ_RC3 |> filter(Stage_avg > h0_RC3_pl, Q_meas > 0),
+      start   = list(a = a_pl_start, b = b_pl_start, h0 = h0_RC3_pl),
+      control = nls.control(maxiter = 500)),
+  error = function(e) {
+    message("RC3 power law failed with free h0 -- falling back to fixed h0")
+    nls(Q_meas ~ a * (Stage_avg - h0_RC3_pl)^b,
+        data    = HQ_RC3 |> filter(Stage_avg > h0_RC3_pl, Q_meas > 0),
+        start   = list(a = a_pl_start, b = b_pl_start),
+        control = nls.control(maxiter = 500))
+  }
+)
+
+RC3_pl_params <- coef(fit_RC3_pl)
+a_RC3_pl <- RC3_pl_params["a"]
+b_RC3_pl <- RC3_pl_params["b"]
+h0_RC3   <- RC3_pl_params["h0"]
+
+# Extend curve down to h0 + 1cm -- power law naturally approaches zero at h0
+# This is extrapolation below the minimum gauged stage (56.88cm) and carries
+# higher uncertainty than the fitted range. Widened CI (±20%) applied below
+# minimum gauged stage to reflect absence of gauging constraint at low flows.
+# The PT records stage below 56.88cm during dry summer periods -- without this
+# extrapolation those timesteps would return NA discharge. No low flow gaugings
+# exist at loc_3 to anchor the curve at the low end; this should be a priority
+# for future field seasons.
+
+RC3_min_gauged <- min(HQ_RC3$Stage_avg)
+RC3_pl_stage   <- seq(round(h0_RC3 + 1, 1), 218, by = 0.1)
+RC3_pl_Q       <- predict(fit_RC3_pl, newdata = data.frame(Stage_avg = RC3_pl_stage))
+RC3_pl_curve   <- tibble(Stage_avg = RC3_pl_stage, Q_model = RC3_pl_Q)
+
+RC3_pl_CI <- RC3_pl_curve |>
+  mutate(
+    Max_CI = ifelse(Stage_avg < RC3_min_gauged,
+                    Q_model * 1.20,   # wider CI below minimum gauged stage
+                    Q_model * 1.10),
+    Min_CI = ifelse(Stage_avg < RC3_min_gauged,
+                    Q_model * 0.80,
+                    Q_model * 0.90)
+  )
+```
+
+_RC3 power law: a = `r round(a_RC3_pl, 4)`, b = `r round(b_RC3_pl, 4)`, h₀ = `r round(h0_RC3, 1)` cm. Curve extended from h₀+1cm to 218cm. CI = ±10% within gauged range (`r round(RC3_min_gauged, 1)`--218cm); ±20% below minimum gauged stage (extrapolated low flow range -- **no gaugings exist below `r round(RC3_min_gauged, 1)`cm at loc_3**)._
+
+```{r rc3_final_plot}
+ggplotly(
+  ggplot() +
+    geom_ribbon(data = RC3_pl_CI,
+                aes(x = Stage_avg, ymin = Min_CI, ymax = Max_CI),
+                fill = "grey80") +
+    geom_vline(xintercept = RC3_min_gauged, linetype = "dashed",
+               colour = "orange") +
+    geom_pointrange(data = HQ_RC3,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        label = paste0("Event: ", Event_no, " | Date: ", datetime,
+                                       " | Q: ", round(Q_meas, 3))),
+                    size = 0.5) +
+    geom_line(data = RC3_pl_curve,
+              aes(x = Stage_avg, y = Q_model,
+                  colour = Stage_avg < RC3_min_gauged)) +
+    scale_colour_manual(values = c("FALSE" = "#333333", "TRUE" = "#E07B54"),
+                        labels = c("FALSE" = "Fitted range",
+                                   "TRUE"  = "Extrapolated (no gaugings)")) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN703 RC3 -- Final rating curve v1 (power law)",
+         subtitle = paste0("Orange dashed = minimum gauged stage (",
+                           round(RC3_min_gauged, 1),
+                           "cm). Orange line = extrapolated low flow range (±20% CI). ",
+                           "Caution: provisional curve, sparse gaugings."),
+         colour = "Curve range",
+         caption = "Caution: sparse data -- provisional curve, to be updated as gaugings accumulate")
+)
+```
+
+```{r rc3_save, include=FALSE}
+RC3_lookup <- RC3_pl_CI |>
+  mutate(
+    Start  = format(as.Date("2023-09-15"), "%m/%d/%Y %H:%M"),
+    Rating = 5L
+  ) |>
+  dplyr::select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating)
+
+write_csv(RC3_lookup, file.path(out_dir, "ssn703_RC3_rating_curve_v1.csv"))
+write_csv(HQ_RC3,    file.path(out_dir, "ssn703_RC3_stagedischarge_v1.csv"))
+
+# Combined lookup -- append new ratings to existing v4 lookup
+ssn703_lookup_combined <- bind_rows(
+  ratingcurve_v4 |> dplyr::select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating),
+  RC2_lookup,
+  RC3_lookup
+)
+write_csv(ssn703_lookup_combined,
+          file.path(out_dir, "ssn703_rating_curve_lookup_combined.csv"))
+```
+
+---
+
+## Summary
+
+| Rating | Period | n gaugings | Stage range (cm) | h₀ (cm) | Span | Version |
+|:-------|:-------|:-----------|:-----------------|:---------|:-----|:--------|
+| RC2 (Rating 4) | 2019-02-09 to 2023-06-25 | `r nrow(HQ_RC2)` | `r round(min(HQ_RC2$Stage_avg),1)` -- `r round(max(HQ_RC2$Stage_avg),1)` | `r round(h0_RC2,1)` | `r RC2_span_value` | v1 |
+| RC3 (Rating 5) | 2023-09-15 onward | `r nrow(HQ_RC3)` | `r round(min(HQ_RC3$Stage_avg),1)` -- `r round(max(HQ_RC3$Stage_avg),1)` | `r round(h0_RC3,1)` | Power law | v1 |
+
+**Previous pipeline (Ratings 1-3) covers up to 2019-02-09 and is not modified.**
+
+**Output files written to `04_outputs/`:**
+
+- `ssn703_RC2_rating_curve_v1.csv` -- Rating 4, loc_2
+- `ssn703_RC3_rating_curve_v1.csv` -- Rating 5, loc_3
+- `ssn703_RC2_stagedischarge_v1.csv` -- RC2 gauging table
+- `ssn703_RC3_stagedischarge_v1.csv` -- RC3 gauging table
+- `ssn703_rating_curve_lookup_combined.csv` -- v4 Ratings 1-3 plus new Ratings 4-5
