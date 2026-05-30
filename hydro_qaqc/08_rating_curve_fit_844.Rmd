@@ -1,0 +1,508 @@
+---
+title: "SSN844 Rating Curve Development"
+author: "[your name]"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+
+library(tidyverse)
+library(plotly)
+library(segmented)
+
+source("02_processing/scripts/selectspan.R")
+source("02_processing/scripts/interp1.R")
+source("02_processing/scripts/interp2.R")
+source("02_processing/scripts/HQ_unc.R")
+source("02_processing/scripts/CI_model_input.R")
+source("02_processing/scripts/CI.R")
+
+select <- dplyr::select
+
+out_dir <- "04_outputs"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+n_boot <- 500
+```
+
+```{r load_data, include=FALSE}
+gaugings_all <- read_csv("03_docs/metadata/ssn844_gaugings_prepped.csv") |>
+  filter(!is.na(Q_meas)) |>
+  mutate(
+    Stage_avg = Stage_avg_corrected,
+    Q_abs_unc = Q_rel_unc / 100 * Q_meas,
+    datetime  = as.Date(datetime)
+  )
+
+# Previous lookup table
+ratingcurve_v4 <- read_csv("03_docs/metadata/ssn844_RC1_lookup_v_previous.csv")
+
+rc_v4_r1 <- ratingcurve_v4 |> filter(Rating == 1) |> dplyr::select(Stage_avg, Q_model)
+rc_v4_r2 <- ratingcurve_v4 |> filter(Rating == 2) |> dplyr::select(Stage_avg, Q_model)
+
+# All gaugings with ok stage
+gaugings_ok <- gaugings_all |> filter(stage_status == "ok")
+
+# Split by Old_New for diagnostic
+gaugings_old <- gaugings_ok |> filter(Old_New == "Old")
+gaugings_new <- gaugings_ok |> filter(Old_New == "New"& Final_rating_curve=="Y")
+```
+
+---
+
+## Site background
+
+SSN844 has a single pressure transducer (`ssn844`) at `loc_1` from 2014-09-10 to present. No sensor location changes — only one physical location throughout the record.
+
+The previous pipeline (v4) applied two rating curves:
+
+| Rating | Start date | Cause |
+|:-------|:-----------|:------|
+| Rating 1 | 2012-01-01 | Original |
+| Rating 2 | 2017-07-13 | Sensor replaced; installation position may have shifted |
+
+**Key question:** Do the new gaugings (post 2019-02-09) sit on the previous Rating 2 curve, or do they depart from it? If they sit on it, no new curve is needed and Rating 2 can simply be extended. If they depart, a new Rating 3 is required.
+
+---
+
+## Diagnostic -- all gaugings vs previous curves {.tabset}
+
+### By Old/New
+
+```{r diagnostic_old_new}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r1,
+              aes(x = Stage_avg, y = Q_model, linetype = "Rating 1"),
+              colour = "black") +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model, linetype = "Rating 2"),
+              colour = "black") +
+    geom_point(data = gaugings_ok,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = Old_New,
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2, alpha = 0.8) +
+    scale_linetype_manual(name = "Previous curve",
+                          values = c("Rating 1" = "dashed",
+                                     "Rating 2" = "solid")) +
+    scale_fill_manual(values = c("Old" = "#4A90A4", "New" = "#E07B54")) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 -- all gaugings vs previous rating curves",
+         subtitle = "Solid = Rating 2 (last active curve) | Dashed = Rating 1",
+         fill = "Old/New",
+         caption = "Old = used in previous pipeline | New = post 2019-02-09")
+)
+```
+
+### By water year
+
+```{r diagnostic_wy}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r1,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "black", linetype = "dashed") +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "black") +
+    geom_point(data = gaugings_ok,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(WY),
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2, alpha = 0.8) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 -- all gaugings by water year vs previous rating curves",
+         fill = "Water year")
+)
+```
+```{r event_no}
+
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "black") +
+    geom_point(data = gaugings_new,
+               aes(x = Stage_avg, y = Q_meas,
+                   colour = factor(Event_no),
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 -- new gaugings by event vs Rating 2",
+         colour = "Event no.")
+)
+```
+
+### New gaugings only vs Rating 2
+
+```{r diagnostic_new_only}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "black") +
+    geom_pointrange(data = gaugings_new,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        fill = factor(WY),
+                        label = paste0("Event: ", Event_no,
+                                       " | Date: ", datetime,
+                                       " | Q: ", round(Q_meas, 3))),
+                    shape = 21, size = 0.5) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 -- new gaugings vs previous Rating 2 curve",
+         subtitle = "If points sit on the curve, no new rating is needed",
+         fill = "Water year")
+)
+```
+
+### Residuals -- new vs Rating 2
+
+```{r diagnostic_resid}
+cols <- c("Q_resid" = "black", "mean Q_abs_unc" = "grey", "mean Q_resid" = "red")
+
+resid_new <- gaugings_new |>
+  mutate(Stage_avg = round(Stage_avg, 1)) |>
+  dplyr::select(Stage_avg, Q_meas, Q_abs_unc) |>
+  inner_join(rc_v4_r2, by = "Stage_avg") |>
+  mutate(resid = Q_meas - Q_model)
+
+if (nrow(resid_new) > 0) {
+  ggplot() +
+    geom_line(data = resid_new,
+              aes(x = Stage_avg, y = resid, colour = "Q_resid")) +
+    geom_point(data = resid_new,
+               aes(x = Stage_avg, y = resid, colour = "Q_resid")) +
+    geom_hline(aes(yintercept =  mean(resid_new$Q_abs_unc, na.rm = TRUE),
+                   colour = "mean Q_abs_unc"), linewidth = 1) +
+    geom_hline(aes(yintercept = -mean(resid_new$Q_abs_unc, na.rm = TRUE),
+                   colour = "mean Q_abs_unc"), linewidth = 1) +
+    geom_hline(aes(yintercept =  mean(resid_new$resid, na.rm = TRUE),
+                   colour = "mean Q_resid"), linewidth = 1) +
+    scale_colour_manual(name = "", values = cols) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Residuals (m³/s)") +
+    labs(title = "SSN844 -- residuals: new gaugings vs Rating 2",
+         subtitle = paste0("n = ", nrow(resid_new), " matched gaugings | ",
+                           "Mean residual = ",
+                           round(mean(resid_new$resid, na.rm = TRUE), 3),
+                           " m³/s | Mean uncertainty = ",
+                           round(mean(resid_new$Q_abs_unc, na.rm = TRUE), 3),
+                           " m³/s"))
+} else {
+  cat("No new gaugings matched Rating 2 stage values -- check stage rounding")
+}
+```
+
+---
+
+## Decision
+
+_Based on the diagnostic plots above, decide whether:_
+
+**A. Rating 2 is still valid** -- new gaugings sit within uncertainty of the old curve. No new curve needed. The previous pipeline discharge record can be extended using Rating 2.
+
+**B. A new Rating 3 is needed** -- new gaugings systematically depart from Rating 2 beyond the measurement uncertainty. Proceed to the curve fitting section below.
+
+---
+
+## RC1 new curve (if needed) {.tabset}
+
+_Complete this section only if the diagnostic shows a new curve is required._
+
+```{r rc1_filter, include=FALSE}
+# Gaugings for new curve fitting
+# Using Final_rating_curve == Y and Old_New == New
+# Adjust filters based on diagnostic findings
+
+HQ_RC1_new <- gaugings_all |>
+  filter(stage_status == "ok",
+         Old_New == "New",
+         Final_rating_curve == "Y")
+
+message("New gaugings for RC1 fitting: ", nrow(HQ_RC1_new))
+message("Stage range: ", round(min(HQ_RC1_new$Stage_avg, na.rm = TRUE), 1),
+        " -- ", round(max(HQ_RC1_new$Stage_avg, na.rm = TRUE), 1), " cm")
+```
+
+_`r nrow(HQ_RC1_new)` new gaugings available for fitting (Final_rating_curve == Y, stage ok)._
+
+### Data assessment {.tabset}
+
+#### Overview
+
+```{r rc1_overview}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "grey50", linetype = "dashed") +
+    geom_point(data = HQ_RC1_new,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(WY),
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 RC1 new -- gaugings by water year",
+         subtitle = "Dashed = previous Rating 2 for reference",
+         fill = "Water year")
+)
+```
+
+#### By event
+
+```{r rc1_event}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "grey50", linetype = "dashed") +
+    geom_point(data = HQ_RC1_new,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = factor(Event_no),
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 RC1 new -- gaugings by event",
+         fill = "Event no.")
+)
+```
+
+#### Hysteresis
+
+```{r rc1_hyst}
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r2,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "grey50", linetype = "dashed") +
+    geom_point(data = HQ_RC1_new,
+               aes(x = Stage_avg, y = Q_meas,
+                   fill = Stage_delta,
+                   label = paste0("Event: ", Event_no,
+                                  " | Date: ", datetime,
+                                  " | Q: ", round(Q_meas, 3))),
+               shape = 21, size = 2) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 RC1 new -- hysteresis assessment",
+         fill = "Stage delta (R/F/C)")
+)
+```
+
+### LOESS span selection
+
+```{r rc1_span}
+## ACTION REQUIRED: adjust span values based on data density
+Rating_RC1_new <- selectspan(HQ_RC1_new, 0.15, 0.20, 0.25)
+
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC1_new,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_meas - Q_abs_unc,
+                        ymax = Q_meas + Q_abs_unc,
+                        label = Event_no),
+                    size = 0.5) +
+    geom_line(data = Rating_RC1_new,
+              aes(x = Stage_avg, y = Q_model, colour = smoothed)) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 RC1 new -- LOESS span selection")
+)
+```
+
+```{r rc1_span_choose, include=FALSE}
+## ACTION REQUIRED: enter chosen span label and value
+RC1_new_span_label <- "span_b"
+RC1_new_span_value <- 0.20
+
+Rating_RC1_new <- Rating_RC1_new |>
+  filter(smoothed == RC1_new_span_label) |>
+  dplyr::select(Stage_avg, Q_model)
+```
+
+### Extrapolation and final curve
+
+```{r rc1_extrap, include=FALSE}
+h0_RC1_new <- min(HQ_RC1_new$Stage_avg[HQ_RC1_new$Q_meas > 0], na.rm = TRUE) * 0.9
+
+## ACTION REQUIRED: set inflection point for power law extrapolation
+## Previous pipeline used 100cm -- check diagnostic to confirm
+inflection_h_RC1_new <- 100
+
+RC1_new_extrap_data <- HQ_RC1_new |>
+  filter(Stage_avg >= inflection_h_RC1_new, Q_meas > 0)
+
+RC1_new_loglog <- RC1_new_extrap_data |>
+  mutate(log_h = log(Stage_avg - h0_RC1_new), log_Q = log(Q_meas))
+lm_start_RC1_new <- lm(log_Q ~ log_h, data = RC1_new_loglog)
+a_start_RC1_new  <- exp(coef(lm_start_RC1_new)[1])
+b_start_RC1_new  <- coef(lm_start_RC1_new)[2]
+
+fit_RC1_new <- tryCatch(
+  nls(Q_meas ~ a * (Stage_avg - h0)^b,
+      data    = RC1_new_extrap_data,
+      start   = list(a = a_start_RC1_new, b = b_start_RC1_new, h0 = h0_RC1_new),
+      control = nls.control(maxiter = 500)),
+  error = function(e) {
+    message("RC1 new nls failed with free h0 -- falling back to fixed h0")
+    nls(Q_meas ~ a * (Stage_avg - h0_RC1_new)^b,
+        data    = RC1_new_extrap_data,
+        start   = list(a = a_start_RC1_new, b = b_start_RC1_new),
+        control = nls.control(maxiter = 500))
+  }
+)
+
+RC1_new_max_loess    <- max(Rating_RC1_new$Stage_avg)
+RC1_new_Q_at_anchor  <- Rating_RC1_new |>
+  filter(Stage_avg == RC1_new_max_loess) |>
+  pull(Q_model)
+RC1_new_Q_pl_anchor  <- predict(fit_RC1_new,
+                                 newdata = data.frame(Stage_avg = RC1_new_max_loess))
+RC1_new_pl_scale     <- RC1_new_Q_at_anchor / RC1_new_Q_pl_anchor
+
+## ACTION REQUIRED: set max stage for extrapolation
+## Previous pipeline used 146cm -- update if new higher stage observed
+RC1_new_max_stage    <- 146
+
+RC1_new_extrap_stage  <- seq(RC1_new_max_loess + 1, RC1_new_max_stage, by = 1)
+RC1_new_extrap_Q      <- predict(fit_RC1_new,
+                                  newdata = data.frame(Stage_avg = RC1_new_extrap_stage)) * RC1_new_pl_scale
+RC1_new_extrap_values <- tibble(Stage_avg = RC1_new_extrap_stage,
+                                 Q_model   = RC1_new_extrap_Q)
+Rating_RC1_new_full   <- bind_rows(Rating_RC1_new, RC1_new_extrap_values) |>
+  arrange(Stage_avg)
+
+Rating_RC1_new_interp <- interp1(Rating_RC1_new_full)
+names(Rating_RC1_new_interp) <- c("Stage_avg", "Q_model")
+
+HQ_RC1_new_unc    <- HQ_unc(HQ_RC1_new, Rating_RC1_new, Rating_RC1_new_interp)
+CI_input_RC1_new  <- CI_model_input(HQ_RC1_new_unc, n_boot, HQ_RC1_new)
+CI_RC1_new        <- CI(CI_input_RC1_new, n_boot, RC1_new_span_value, 1)
+RatingCI_RC1_new  <- bind_cols(Rating_RC1_new, CI_RC1_new)
+
+RC1_new_extrap_CI      <- RC1_new_extrap_values |>
+  mutate(Max_CI = Q_model * 1.05, Min_CI = Q_model * 0.95)
+RatingCI_RC1_new_full   <- bind_rows(RatingCI_RC1_new, RC1_new_extrap_CI) |>
+  arrange(Stage_avg)
+RatingCI_RC1_new_interp <- interp2(RatingCI_RC1_new_full)
+
+RC1_new_params <- coef(fit_RC1_new)
+```
+
+_h₀ = `r round(h0_RC1_new, 1)` cm | Inflection = `r round(inflection_h_RC1_new, 1)` cm | Power law anchored at LOESS endpoint (`r round(RC1_new_max_loess, 1)` cm) | a = `r round(RC1_new_params["a"], 4)`, b = `r round(RC1_new_params["b"], 4)`_
+
+```{r rc1_extrap_plot}
+ggplotly(
+  ggplot() +
+    geom_vline(xintercept = inflection_h_RC1_new, linetype = "dotted",
+               colour = "grey50") +
+    geom_line(data = Rating_RC1_new_full,
+              aes(x = Stage_avg, y = Q_model,
+                  colour = Stage_avg > RC1_new_max_loess)) +
+    geom_point(data = HQ_RC1_new,
+               aes(x = Stage_avg, y = Q_meas,
+                   label = paste0("Event: ", Event_no, " | Date: ", datetime)),
+               colour = ifelse(HQ_RC1_new$Stage_avg >= inflection_h_RC1_new,
+                               "#E07B54", "black"),
+               size = 2) +
+    scale_colour_manual(values = c("FALSE" = "black", "TRUE" = "red"),
+                        labels = c("LOESS", "Power law extrapolation")) +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 RC1 new -- LOESS with anchored power law extrapolation",
+         subtitle = paste0("Dotted = inflection (", round(inflection_h_RC1_new, 1),
+                           " cm). Orange = used for power law fit."),
+         colour = "Fit type")
+)
+```
+
+```{r rc1_final_plot}
+Q_meas_RC1_new <- cbind(HQ_RC1_new$Stage_avg, HQ_RC1_new_unc)
+colnames(Q_meas_RC1_new)[1] <- "Stage_avg"
+
+ggplotly(
+  ggplot() +
+    geom_ribbon(data = RatingCI_RC1_new_interp,
+                aes(x = Stage_avg, ymin = Min_CI, ymax = Max_CI),
+                fill = "grey80") +
+    geom_pointrange(data = Q_meas_RC1_new,
+                    aes(x = Stage_avg, y = Q_meas,
+                        ymin = Q_min, ymax = Q_max),
+                    size = 0.5) +
+    geom_line(data = RatingCI_RC1_new_interp,
+              aes(x = Stage_avg, y = Q_model),
+              colour = "#333333") +
+    theme_bw() +
+    xlab("Stage (cm)") + ylab("Discharge (m³/s)") +
+    labs(title = "SSN844 -- Final rating curve v5 (new RC1)")
+)
+```
+
+```{r rc1_save, include=FALSE}
+## ACTION REQUIRED: update Rating number and Start date based on decision
+## If Rating 2 is still valid and just extended: Rating = 2, Start = existing start
+## If new curve needed: Rating = 3, Start = 2019-02-09
+
+RC1_new_lookup <- RatingCI_RC1_new_interp |>
+  mutate(
+    Start  = format(as.Date("2019-02-09"), "%m/%d/%Y %H:%M"),
+    Rating = 3L
+  ) |>
+  dplyr::select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating)
+
+write_csv(RC1_new_lookup,
+          file.path(out_dir, "ssn844_RC1_new_rating_curve_v5.csv"))
+write_csv(HQ_RC1_new,
+          file.path(out_dir, "ssn844_RC1_new_stagedischarge_v5.csv"))
+
+# Combined lookup -- append new rating to existing v4 lookup
+ssn844_lookup_combined <- bind_rows(
+  ratingcurve_v4 |> dplyr::select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating),
+  RC1_new_lookup
+)
+write_csv(ssn844_lookup_combined,
+          file.path(out_dir, "ssn844_rating_curve_lookup_combined.csv"))
+
+message("Saved: ssn844_RC1_new_rating_curve_v5.csv")
+message("Saved: ssn844_rating_curve_lookup_combined.csv")
+```
+
+---
+
+## Summary
+
+_Complete after reviewing diagnostic and fitting decision._
+
+| Rating | Period | n gaugings | Notes |
+|:-------|:-------|:-----------|:------|
+| Rating 1 (v4) | pre 2017-07-13 | — | Previous pipeline, not modified |
+| Rating 2 (v4) | 2017-07-13 to 2019-02-09 | — | Previous pipeline, not modified |
+| Rating 3 (new) | 2019-02-09 onward | `r nrow(HQ_RC1_new)` | New curve if diagnostic shows departure from Rating 2 |
