@@ -7,6 +7,7 @@ library(sentryR)
 library(curl)
 
 Sys.setenv(RERDDAP_DEFAULT_URL = "https://catalogue.hakai.org/erddap/")
+options(scipen = 999) # Disable scientific notation
 log_info(
   "Using the '{Sys.getenv('RERDDAP_DEFAULT_URL')}' ERDDAP instance"
 )
@@ -44,11 +45,33 @@ get_historical_erddap_data <- function(station_id, date) {
     time_param,
     station_id_param
   )
+  dest_file <- glue("historical-data/Hakai-historical-{station_id}.parquet")
 
   fs::file_move(
     attr(file, "path"),
-    glue("historical-data/historical-{station_id}.parquet")
+    dest_file
   )
+  dest_dir <- fs::path_ext_remove(dest_file)
+  fs::dir_create(dest_dir)
+
+  df <- nanoparquet::read_parquet(dest_file)
+  chunk_size <- 10000
+  total_rows <- nrow(df)
+  n_chunks <- ceiling(total_rows / chunk_size)
+
+  for (i in 1:n_chunks) {
+    print(glue("Processing chunk {i} of {n_chunks}"))
+    start_row <- (i - 1) * chunk_size + 1
+    end_row <- min(i * chunk_size, total_rows)
+
+    chunk <- df[start_row:end_row, ]
+
+    filename <- glue(
+      "{dest_dir}/{dest_dir}_chunk{i}_{start_row}_to_{end_row}.parquet"
+    )
+    nanoparquet::write_parquet(chunk, filename)
+  }
+  unlink(dest_file) # Remove the original file after processing
 }
 
 
