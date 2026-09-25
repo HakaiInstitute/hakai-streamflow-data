@@ -23,6 +23,28 @@
 #   "gf_spline_event"  -- transmission gap; filled using spline interpolation (event)
 #   "unfilled"         -- gap too long and no SA coverage; remains NA
 #
+# CHANGE LOG (this version):
+#   - FIX: gap_id assignment previously only incremented on valid->valid
+#     transitions (`!is_gap & lag(!is_gap)`), which merged two separate gaps
+#     into one gap_id whenever they were separated by exactly one valid
+#     reading. Changed to increment on gap *starts* instead
+#     (`is_gap & !lag(is_gap)`), so each contiguous run of NAs gets its own
+#     gap_id regardless of neighbouring single-point gaps.
+#   - FIX: gap duration alone (gap_mins <= max_gap_mins) was previously used
+#     to decide both (a) whether a gap counted as "fillable" for flagging
+#     purposes, and (b) what flag to assign -- but never checked whether
+#     na.spline() actually returned a non-NA value for that gap. Gaps at the
+#     start/end of a sensor's deployment window, or immediately adjacent to
+#     a long unfillable/bad_data block, have no bracketing data for
+#     na.spline() to interpolate from, so it silently returns NA even though
+#     the gap was "duration-eligible." These rows were being flagged
+#     gf_spline / gf_spline_event / replaced_spline / replaced_spline_event
+#     while stage_qc stayed NA -- i.e. flagged as filled but actually empty.
+#     Added a validation pass after spline interpolation that checks
+#     stage_splined for NA and downgrades the flag to "unfilled" (or
+#     "bad_data" if the gap originated from a bad_data period) when the
+#     spline did not actually produce a value.
+#
 # Inputs:
 #   02_processing/data_parsed/ssn703_corrected.rds
 #
@@ -53,7 +75,7 @@ SPIKE_WINDOW           <- 5     # rolling median window (number of timesteps)
 MAX_FILL_GAP_MINS      <- 180   # maximum gap to fill without SA (minutes)
 SA_R2_THRESHOLD        <- 0.95  # minimum R2 to use SA relationship for gap filling
 EVENT_STAGE_THRESHOLD  <- 0.60  # stage above which conditions are considered event-like
-                                 # gap fills above this threshold get gf_spline_event flag
+# gap fills above this threshold get gf_spline_event flag
 
 sensor_colours <- c(
   "ssn703_a"  = "#E41A1C",
@@ -166,8 +188,8 @@ primary <- primary |>
     rolling_dev   = abs(stage_qc - rolling_med),
     # Flag spikes
     is_spike      = qc_flag == "raw" &
-                    (stage_diff > SPIKE_RATE_M_PER_5MIN |
-                     rolling_dev > 3 * SPIKE_RATE_M_PER_5MIN),
+      (stage_diff > SPIKE_RATE_M_PER_5MIN |
+         rolling_dev > 3 * SPIKE_RATE_M_PER_5MIN),
     qc_flag       = if_else(is_spike & !is.na(is_spike), "spike", qc_flag),
     stage_qc      = if_else(qc_flag == "spike", NA_real_, stage_qc)
   ) |>
@@ -191,35 +213,35 @@ message("Spikes flagged: ", n_spikes, " rows")
 # Relationship is assessed on clean raw data only (qc_flag == "raw").
 
 fill_with_sa <- function(df, sa_df, r2_threshold) {
-
+  
   site <- unique(df$site_id)
   message("\n  Assessing SA relationship for ", site)
-
+  
   # Join SA data to primary
   df_sa <- df |>
     left_join(sa_df, by = "timestamp")
-
+  
   # Fit relationship on clean overlapping data only
   fit_data <- df_sa |>
     filter(qc_flag == "raw", !is.na(stage_qc), !is.na(stage_sa))
-
+  
   if (nrow(fit_data) < 100) {
     message("  ", site, ": insufficient clean overlapping data for SA relationship -- skipping")
     df$gf_sa_used <- FALSE
     return(df)
   }
-
+  
   fit <- lm(stage_qc ~ stage_sa, data = fit_data)
   r2  <- summary(fit)$r.squared
-
+  
   message("  ", site, ": SA relationship R2 = ", round(r2, 4))
-
+  
   if (r2 < r2_threshold) {
     message("  ", site, ": R2 below threshold (", r2_threshold, ") -- SA filling skipped")
     df$gf_sa_used <- FALSE
     return(df)
   }
-
+  
   # Apply SA relationship to fill NAs and bad_data/spike rows where SA available
   df_sa <- df_sa |>
     mutate(
@@ -234,7 +256,7 @@ fill_with_sa <- function(df, sa_df, r2_threshold) {
       stage_qc = if_else(!is.na(fill_flag), stage_sa_predicted, stage_qc)
     ) |>
     select(-stage_sa, -stage_sa_predicted, -fill_flag)
-
+  
   df_sa$gf_sa_used <- TRUE
   message("  ", site, ": SA gap filling applied")
   return(df_sa)
@@ -258,11 +280,15 @@ primary <- primary |>
 #   - bad_data or spike rows filled --> replaced_spline / replaced_spline_event
 #   - Gaps longer than MAX_FILL_GAP_MINS --> unfilled (NA)
 #   - bad_data rows unfillable after all tiers --> retain bad_data flag
+#   - Gaps that are duration-eligible but for which na.spline() could not
+#     actually produce a value (no bracketing data, e.g. at the start/end
+#     of the deployment window) are downgraded to unfilled / bad_data --
+#     see validation step below.
 
 fill_with_spline <- function(df, max_gap_mins, event_threshold) {
-
+  
   site <- unique(df$site_id)
-
+  
   # Treat bad_data and spike rows as NA for gap identification
   df <- df |>
     arrange(timestamp) |>
@@ -271,9 +297,15 @@ fill_with_spline <- function(df, max_gap_mins, event_threshold) {
       stage_for_gaps = if_else(qc_flag %in% c("bad_data", "spike"),
                                NA_real_, stage_qc),
       is_gap  = is.na(stage_for_gaps),
-      gap_id  = cumsum(!is_gap & lag(!is_gap, default = TRUE))
+      # FIX: increment gap_id on gap *starts* (is_gap & !lag(is_gap)), not on
+      # valid->valid transitions. The previous version
+      # (cumsum(!is_gap & lag(!is_gap, default = TRUE))) merged two separate
+      # gaps into a single gap_id whenever they were separated by exactly one
+      # valid reading, which inflated gap_mins for gap_info below and could
+      # miscategorize short, genuinely separate gaps.
+      gap_id  = cumsum(is_gap & !lag(is_gap, default = FALSE))
     )
-
+  
   # For each gap, determine length and whether it's during an event
   gap_info <- df |>
     filter(is_gap) |>
@@ -287,12 +319,12 @@ fill_with_spline <- function(df, max_gap_mins, event_threshold) {
       any_bad_data = any(original_flag == "bad_data"),
       .groups    = "drop"
     )
-
+  
   if (nrow(gap_info) == 0) {
     message("  ", site, ": no gaps remaining after SA filling")
     return(df |> select(-is_gap, -gap_id, -original_flag, -stage_for_gaps))
   }
-
+  
   # Add stage context at gap boundaries for event detection
   gap_info <- gap_info |>
     rowwise() |>
@@ -308,27 +340,30 @@ fill_with_spline <- function(df, max_gap_mins, event_threshold) {
         pull(stage_for_gaps) |>
         (\(x) if (length(x) == 0) NA_real_ else x)(),
       is_event_gap = (!is.na(stage_before) & stage_before > event_threshold) |
-                     (!is.na(stage_after)  & stage_after  > event_threshold)
+        (!is.na(stage_after)  & stage_after  > event_threshold)
     ) |>
     ungroup()
-
+  
   fillable   <- gap_info |> filter(gap_mins <= max_gap_mins)
   unfillable <- gap_info |> filter(gap_mins > max_gap_mins)
-
-  message("  ", site, ": ", nrow(fillable), " gaps fillable by spline (",
+  
+  message("  ", site, ": ", nrow(fillable), " gaps duration-eligible for spline (",
           nrow(gap_info |> filter(gap_mins <= max_gap_mins & is_event_gap)),
           " during events), ",
           nrow(unfillable), " gaps too long -- left as NA")
-
+  message("  ", site, ": note -- duration-eligible gaps at the start/end of the ",
+          "deployment window, or without bracketing data, may still fail to ",
+          "spline; these are caught and downgraded in the validation step below")
+  
   fillable_gap_ids <- fillable$gap_id
-
+  
   df <- df |>
     mutate(
       fill_eligible    = is_gap & (gap_id %in% fillable_gap_ids),
       stage_for_spline = if_else(fill_eligible | !is_gap, stage_for_gaps, NA_real_),
       stage_splined    = na.spline(stage_for_spline, na.rm = FALSE)
     )
-
+  
   # Assign flags -- distinguish between gap fills and replacements
   df <- df |>
     left_join(
@@ -350,14 +385,49 @@ fill_with_spline <- function(df, max_gap_mins, event_threshold) {
       ),
       stage_qc = case_when(
         qc_flag %in% c("gf_spline", "gf_spline_event",
-                        "replaced_spline", "replaced_spline_event") ~ stage_splined,
+                       "replaced_spline", "replaced_spline_event") ~ stage_splined,
         TRUE ~ stage_qc
       )
-    ) |>
+    )
+  
+  # -----------------------------------------------------------------------
+  # FIX: validate that spline-flagged rows actually got a value.
+  # A gap being "duration-eligible" (gap_mins <= max_gap_mins) does not
+  # guarantee na.spline() could produce a value -- it needs valid data on
+  # both sides within the vector. Gaps at the start/end of the trimmed
+  # deployment window, or immediately adjacent to a long unfillable block
+  # that consumed the nearest anchor point, will come back from na.spline()
+  # as NA despite being flagged as filled. Downgrade those here rather than
+  # silently shipping a "filled" flag on an empty value.
+  # -----------------------------------------------------------------------
+  n_before_validation <- sum(
+    df$qc_flag %in% c("gf_spline", "gf_spline_event",
+                      "replaced_spline", "replaced_spline_event") &
+      is.na(df$stage_qc)
+  )
+  
+  df <- df |>
+    mutate(
+      qc_flag = if_else(
+        qc_flag %in% c("gf_spline", "gf_spline_event",
+                       "replaced_spline", "replaced_spline_event") &
+          is.na(stage_qc),
+        if_else(any_bad_data, "bad_data", "unfilled"),
+        qc_flag
+      )
+    )
+  
+  if (n_before_validation > 0) {
+    message("  ", site, ": WARNING -- ", n_before_validation,
+            " rows were flagged as spline-filled but na.spline() returned NA ",
+            "(no bracketing data available). Downgraded to unfilled/bad_data.")
+  }
+  
+  df <- df |>
     select(-is_gap, -gap_id, -gap_mins, -is_event_gap, -any_bad_data,
            -stage_splined, -fill_eligible, -stage_for_spline,
            -original_flag, -stage_for_gaps)
-
+  
   return(df)
 }
 
@@ -377,6 +447,25 @@ primary |>
   count(site_id, qc_flag) |>
   pivot_wider(names_from = qc_flag, values_from = n, values_fill = 0) |>
   print()
+
+# Sanity check: confirm no rows remain that are flagged as filled but empty.
+# This should return 0 rows -- if it doesn't, there's still a gap-filling
+# edge case not covered by the validation step above.
+n_flagged_but_empty <- primary |>
+  filter(
+    qc_flag %in% c("gf_sa", "gf_spline", "gf_spline_event",
+                   "replaced_sa", "replaced_spline", "replaced_spline_event"),
+    is.na(stage_qc)
+  ) |>
+  nrow()
+
+if (n_flagged_but_empty > 0) {
+  warning(n_flagged_but_empty,
+          " rows are flagged as filled but stage_qc is still NA -- ",
+          "investigate before proceeding.")
+} else {
+  message("\nSanity check passed: no rows flagged as filled with an empty stage_qc value")
+}
 
 
 # -----------------------------------------------------------------------------
@@ -400,7 +489,7 @@ flag_colours <- c(
 )
 
 plot_qc_sensor <- function(df, site) {
-
+  
   df |>
     filter(site_id == site) |>
     ggplot(aes(x = timestamp, y = stage_qc, colour = qc_flag)) +

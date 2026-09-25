@@ -2,7 +2,7 @@
 # 09_rainfall_runoff_check.R
 # Sanity check: compare computed discharge against rainfall for SSN703
 # Catchment area: 12.79 km²
-# RC2 applied from: 2019-02-09
+# RC2 applied from: 2018-09-14
 # RC3 applied from: 2023-09-15
 # =============================================================================
 
@@ -12,7 +12,7 @@ library(tidyverse)
 # Constants
 # -----------------------------------------------------------------------------
 CATCHMENT_AREA_M2 <- 12.79e6  # 12.79 km² in m²
-RC2_START         <- as.POSIXct("2019-02-09", tz = "UTC")
+RC2_START         <- as.POSIXct("2018-09-14", tz = "UTC")
 RC3_START         <- as.POSIXct("2023-09-15", tz = "UTC")
 
 # -----------------------------------------------------------------------------
@@ -108,7 +108,7 @@ combined <- full_join(
 # RC2 VALIDATION -- Oct 2019 to Jun 2023
 # =============================================================================
 combined_RC2 <- combined |>
-  filter(timestamp_5min >= as.POSIXct("2019-10-01", tz = "UTC"),
+  filter(timestamp_5min >= as.POSIXct("2018-10-01", tz = "UTC"),
          timestamp_5min <  as.POSIXct("2023-06-25", tz = "UTC"))
 
 annual_RC2 <- combined_RC2 |>
@@ -156,7 +156,31 @@ p2 <- ggplot(cumulative_RC2, aes(x = cum_rain_mm, y = cum_runoff_mm,
 print(p2)
 ggsave("04_outputs/ssn703_RC2_cumulative_rainfall_runoff.png", p2,
        width = 10, height = 7)
+# Plot RC2 -- monthly bar chart
+monthly_RC2 <- combined_RC2 |>
+  mutate(month = floor_date(timestamp_5min, unit = "month")) |>
+  group_by(month) |>
+  summarise(
+    total_rain_mm   = sum(rain_mm, na.rm = TRUE),
+    total_runoff_mm = sum(Q_mm,    na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(total_rain_mm, total_runoff_mm),
+               names_to = "variable", values_to = "mm") |>
+  mutate(variable = recode(variable,
+                           "total_rain_mm"   = "Rainfall",
+                           "total_runoff_mm" = "Runoff"))
 
+p9 <- ggplot(monthly_RC2, aes(x = month, y = mm, fill = variable)) +
+  geom_col(position = "dodge") +
+  scale_x_datetime(date_labels = "%b %Y", date_breaks = "1 month") +
+  scale_fill_manual(values = c("Rainfall" = "#4E9BB9", "Runoff" = "#E07B54")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab(NULL) + ylab("Total (mm)") +
+  labs(title = "SSN703 RC2 -- monthly rainfall vs runoff",
+       fill = NULL,
+       caption = "Caution: provisional curve, sparse gaugings")
 # =============================================================================
 # RC3 VALIDATION -- Oct 2023 onward
 # =============================================================================

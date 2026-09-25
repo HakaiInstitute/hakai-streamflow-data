@@ -29,6 +29,21 @@
 #   - Tables link on station_id + sensor_id
 #   - All timestamps are PST
 #
+# CHANGE LOG:
+#   [date] -- ssn703_a bad_data_start confirmed via visual inspection of
+#             02b_plot_full_history_with_ratings.R / 02c interactive version:
+#             set to 2018-02-09 00:00:00 (was NA/TBC)
+#   [date] -- ssn703_c date_end and bad_data_end corrected from
+#             2023-08-03 07:00:00 to 2023-09-14 23:55:00. Sensor continued
+#             recording (bad) past its originally logged removal date --
+#             confirmed visually that the bad data chunk runs through to
+#             Sept 14, one day before the RC3 database cutover of Sept 15.
+#             Matching overlap_registry ssn703_c -> ssn703_d overlap_end
+#             updated to the same timestamp for consistency between tables.
+#             TODO: confirm exact time of removal (currently placeholder
+#             23:55:00 to match 5-min interval convention elsewhere in
+#             this registry) -- refine once exact removal time is known.
+#
 # Author: [your name]
 # Date: [date]
 # =============================================================================
@@ -82,9 +97,9 @@ sensor_registry <- tribble(
   # loc_2: ssn703_c is a different location -- separate rating curve period; authoritative from install
   # loc_3: ssn703_d is a different location again -- separate rating curve period; authoritative from install
   # loc_4: ssn703_sa is upstream supplementary; independent of loc_1/2/3
-  "SSN703",    "ssn703_a",   "loc_1",      "primary",       "2014-08-03 10:55:00",  "2018-09-12 01:00:00",  NA,                     "2018-09-12 01:00:00",  "RC1",                "original sensor; failed during ssn703_b overlap; bad_data_start TBC from visual assessment; offset of +0.02m applied to bring onto ssn703_b datum",
-  "SSN703",    "ssn703_b",   "loc_1",      "primary",       "2017-11-13 14:00:00",  "2021-03-25 10:35:00",  NA,                     NA,                     "RC1",                "installed to replace ssn703_a; close to loc_1 -- same rating curve period; authoritative from install date; stage record clean through to date_end -- temperature failed 2019-05-28 but stage unaffected; later failed vs ssn703_c",
-  "SSN703",    "ssn703_c",   "loc_2",      "primary",       "2018-09-14 20:00:00",  "2023-08-03 07:00:00",  "2023-06-25 17:00:00",  "2023-08-03 07:00:00",  "RC2",                "new location; separate rating curve period; authoritative from install date; stage went bad 2023-06-25 17:00 -- temperature bad_data_start was 2021-03-05 but stage record clean until June 2023; later failed vs ssn703_d",
+  "SSN703",    "ssn703_a",   "loc_1",      "primary",       "2014-08-03 10:55:00",  "2018-09-12 01:00:00",  "2018-02-09 00:00:00",  "2018-09-12 01:00:00",  "RC1",                "original sensor; failed during ssn703_b overlap; bad_data_start confirmed via visual inspection (02b/02c plots) as 2018-02-09; offset of +0.02m applied to bring onto ssn703_b datum",
+  "SSN703",    "ssn703_b",   "loc_1",      "primary",       "2017-11-13 14:00:00",  "2021-03-25 10:55:00",  NA,                     NA,                     "RC1",                "installed to replace ssn703_a; close to loc_1 -- same rating curve period; authoritative from install date; stage record clean through to date_end -- temperature failed 2019-05-28 but stage unaffected; later failed vs ssn703_c",
+  "SSN703",    "ssn703_c",   "loc_2",      "primary",       "2018-09-14 20:00:00",  "2023-09-14 23:55:00",  "2023-06-25 17:00:00",  "2023-09-14 23:55:00",  "RC2",                "new location; separate rating curve period; authoritative from install date; stage went bad 2023-06-25 17:00 -- sensor continued recording (bad) rather than being pulled immediately; date_end/bad_data_end corrected from 2023-08-03 to 2023-09-14 (confirmed visually, chunk runs to one day before RC3 cutover of 2023-09-15) -- exact removal time TBC, placeholder 23:55; temperature bad_data_start was 2021-03-05 but stage record clean until June 2023; later failed vs ssn703_d",
   "SSN703",    "ssn703_d",   "loc_3",      "primary",       "2021-09-02 12:55:00",  NA,                     "2023-10-23 00:00:00",  "2023-11-26 23:55:00",  "RC3",                "new location; third distinct rating curve period; authoritative from install date; ongoing; known bad data period Oct-Nov 2023",
   "SSN703",    "ssn703_sa",  "loc_4",      "supplementary", "2018-08-08 23:00:00",  "2025-05-05 10:00:00",  NA,                     NA,                     NA,                   "upstream supplementary; independent of loc_1/2/3 rating curve locations; gaps present",
   
@@ -139,7 +154,10 @@ overlap_registry <- tribble(
   # Same location (loc_1) -- datum offset calculated and applied (+0.02m to 703a)
   # Decoupling is seasonal and intermittent -- not a hard breakpoint
   # Storm peaks used across full overlap; offset confirmed from offset vs stage plot
-  "SSN703",    "ssn703_a",         "ssn703_b",             "2017-11-13 14:00:00",  "2018-09-12 01:00:00",  NA,                  NA,                NA,                 "yes",       "storm_peaks",  "decoupling is seasonal and intermittent -- no hard clean window end; storm peaks used across full overlap; offset = +0.02m applied to ssn703_a; uncertainty +/-0.01m; no formal survey",
+  # ssn703_a confirmed unreliable from 2018-02-09 onward (see sensor_registry) --
+  # any offset calculation drawing on data after this date should be treated
+  # with caution regardless of storm-peak matching
+  "SSN703",    "ssn703_a",         "ssn703_b",             "2017-11-13 14:00:00",  "2018-09-12 01:00:00",  NA,                  NA,                NA,                 "yes",       "storm_peaks",  "decoupling is seasonal and intermittent -- no hard clean window end; storm peaks used across full overlap; offset = +0.02m applied to ssn703_a; uncertainty +/-0.01m; no formal survey; ssn703_a bad_data_start confirmed 2018-02-09 -- offset calc should exclude storm peaks after this date if not already handled",
   
   # SSN703: ssn703_b (failing) vs ssn703_c (replacement)
   # Different location (loc_1 -> loc_2) -- genuinely different water surface
@@ -149,7 +167,9 @@ overlap_registry <- tribble(
   # SSN703: ssn703_c (failing) vs ssn703_d (replacement)
   # Different location (loc_2 -> loc_3) -- different hydraulic environment
   # No offset calculated -- ssn703_d is authoritative from install date
-  "SSN703",    "ssn703_c",         "ssn703_d",             "2021-09-02 12:55:00",  "2023-08-03 07:00:00",  NA,                  NA,                NA,                 "no",        "none",         "location change -- loc_2 to loc_3; different hydraulic geometry and likely different control; no datum offset computed; ssn703_d authoritative from install date; treat as start of RC3",
+  # overlap_end corrected from 2023-08-03 07:00:00 to 2023-09-14 23:55:00 to
+  # match corrected ssn703_c date_end/bad_data_end in sensor_registry
+  "SSN703",    "ssn703_c",         "ssn703_d",             "2021-09-02 12:55:00",  "2023-09-14 23:55:00",  NA,                  NA,                NA,                 "no",        "none",         "location change -- loc_2 to loc_3; different hydraulic geometry and likely different control; no datum offset computed; ssn703_d authoritative from install date; treat as start of RC3; overlap_end corrected to 2023-09-14 23:55:00 to match ssn703_c's corrected date_end -- entire ssn703_c bad_data window (2023-06-25 to 2023-09-14) must be flagged unfilled downstream, not just through the old 2023-08-03 cutoff",
   
   # SSN1015: ssn1015_a (left in) vs ssn1015_b (replacement)
   # Same location -- ssn1015_a data after install of ssn1015_b not used
@@ -172,4 +192,9 @@ message("Saved: ", file.path(out_dir, "sensor_registry.csv"))
 message("Saved: ", file.path(out_dir, "overlap_registry.csv"))
 message("Done -- review CSVs before proceeding to 01_load_stage_data.R")
 message("\nReminder -- fields still to confirm:")
-message("  ssn703_a : bad_data_start (currently NA -- TBC from visual assessment)")
+message("  ssn703_c : exact removal timestamp (currently placeholder 2023-09-14 23:55:00)")
+message("\nIMPORTANT: after regenerating these tables, rerun the qc_flag-assignment step")
+message("that builds 04_outputs/per_rc/ssn703_RC2_stage_qc.csv, then rerun 10_discharge.R,")
+message("so the extended ssn703_c bad_data window (now through 2023-09-14) is actually")
+message("propagated into qc_flag = 'unfilled' and excluded from Q_model -- these tables")
+message("alone do not update the already-computed discharge output.")
