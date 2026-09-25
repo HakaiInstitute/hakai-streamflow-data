@@ -1,20 +1,27 @@
 # =============================================================================
-# qc_functions.R -- everything reusable for the SSN703 PLS QC workflow
+# stage_qc_functions.R -- the reusable function library for stage QC
 # =============================================================================
-# Source this ONE file, then run pls_qc_workflow.R.
+# Source this ONE file, then run run_stage_qc_ssn703.R (which sources
+# stage_qc_pipeline.R internally).
 #
-# Function naming modeled on hydrocan/tidyhydat: <prefix>_<verb>_<noun>(),
-# snake_case throughout, tibble in -> tibble out. `sn_` = Hakai Sensor
-# Network API access; `qc_` = quality control (diagnostics, flagging
-# support, review). measurement_time is the one column name used
-# end-to-end everywhere in this file -- see the note under section A.
+# Replaces, with no loss of functionality:
+#   qc-functions.R, sn-functions.R, qc_diagnostics.R, qc_plot_diagnostic.R,
+#   qc_review.R, plot_sensor_qc_flags.R, and the loader half of
+#   01_load_stage_data.R / the overlap plots of 02_inspect_stage.R.
+#
+# Naming follows hydrocan / tidyhydat: <prefix>_<verb>_<noun>(), snake_case,
+# tibble in -> tibble out. `sn_` = Hakai Sensor Network API access;
+# `stage_` = local raw-file loading; `qc_` = quality-control diagnostics,
+# flagging support, and review. `measurement_time` is the one time-column
+# name used end to end (the raw sn/views endpoint's camelCase
+# `measurementTime` is renamed once, at read).
 #
 # Sections:
-#   A. sn_*  -- API download (sn_connect, sn_read_values, sn_read_qc, ...)
-#   B. qc_*  -- pre-threshold diagnostics (gap lengths, rate of change)
-#   C. qc_*  -- pre-flagging visual triage (qc_plot_diagnostic)
-#   D. qc_*  -- post-flagging review & verification (chunks, plots,
-#               qc_verify_gap_fill)
+#   A. sn_*    -- Hakai API download (default input path)
+#   B. stage_* -- local raw CSV loader (offline / reprocessing fallback)
+#   C. qc_*    -- pre-threshold diagnostics (gap lengths, rate of change)
+#   D. qc_*    -- pre-flagging visual triage (qc_plot_diagnostic, qc_plot_overlap)
+#   E. qc_*    -- post-flagging review & verification
 # =============================================================================
 
 library(tidyverse)
@@ -28,6 +35,7 @@ library(plotly)
 # #############################################################################
 # A. sn_* -- Hakai Sensor Network API download
 # #############################################################################
+
 #' Connect to the Hakai Sensor Network API
 #'
 #' Thin wrapper around [hakaiApi::Client] so callers don't need to know the
@@ -56,9 +64,8 @@ sn_connect <- function(api_root = "https://portal.hakai.org") {
 #' @param start_date,end_date Date range as `"YYYY-MM-DD"` strings.
 #' @return A long tibble with columns `measurement_time`, `site`,
 #'   `variable`, `value`. If the date range has no matching rows at all (a
-#'   real, non-error outcome -- e.g. a sensor not active yet/anymore for
-#'   that window), returns a 0-row tibble with those same columns rather
-#'   than erroring.
+#'   real, non-error outcome), returns a 0-row tibble with those same
+#'   columns rather than erroring.
 #' @export
 sn_read_values <- function(client, site, view, components, start_date, end_date) {
   field_names <- paste(site, components, sep = ":")
@@ -96,11 +103,24 @@ sn_read_values <- function(client, site, view, components, start_date, end_date)
 
 #' Derive the underlying QC table name for a site/view
 #'
+#' The QC endpoint wants a snake_case name, e.g. `"ssn703us_5minute"`:
+#' lowercase, strip anything before the last `/`, drop `...samples` onward,
+#' replace `:` with `_`.
+#'
 #' @param site,view As in [sn_read_values()].
 #' @return A single string: the QC table name.
 #' @export
 sn_qc_table_name <- function(site, view) {
+  # The "outlet"/"trib" underscore insertion mirrors real QC table names
+  # (confirmed against api/sn/tables/list 2026-09-24): e.g. site
+  # "W50_SalmTrib11_T1" -> table "w50_salm_trib11_t1_1hour", not
+  # "w50_salmtrib11_t1_1hour". Without it, every W50_*Trib*/W50_*Outlet*
+  # site (~200+ of them) resolves to a table name that doesn't exist --
+  # sn_read_qc()/sn_post_qc() would silently miss real QC history instead
+  # of erroring, since sn_read_qc() treats an unreachable table as "no
+  # rows", not a failure.
   glue("{site}:{view}") %>%
+    str_replace_all(regex("(outlet|trib)", ignore_case = TRUE), "_\\1") %>%
     tolower() %>%
     str_remove(".*/") %>%
     str_remove("samples.*$") %>%
@@ -110,10 +130,8 @@ sn_qc_table_name <- function(site, view) {
 
 #' Read manual QC flags for a station's underlying table
 #'
-#' Pulls from `sn/qc/:tableName` (documented at
-#' <https://hakaiinstitute.github.io/hakai-api/endpoints/>). One table can
-#' hold QC history for several `measurement_name` values at once -- filter
-#' with [sn_join_qc()], not here.
+#' Pulls from `sn/qc/:tableName`. One table can hold QC history for several
+#' `measurement_name` values -- filter with [sn_join_qc()], not here.
 #'
 #' @param client A client from [sn_connect()].
 #' @param table_name From [sn_qc_table_name()].
@@ -142,19 +160,12 @@ sn_read_qc <- function(client, table_name, start_date, end_date) {
 #' Join QC flags onto a values tibble
 #'
 #' Merges only the `measurement_name`s explicitly listed in `qc_map` -- a
-#' component with no entry in `qc_map` is left unmerged on purpose (e.g.
-#' `PLS_Lvl`, which has no QC history under that name; only its calculated
-#' derivative `Stage` does, and that's a different variable, not a
-#' stand-in for it).
+#' component with no entry is left unmerged on purpose.
 #'
 #' @param values A tibble from [sn_read_values()].
 #' @param qc_flags A tibble from [sn_read_qc()].
-#' @param qc_map Named character vector: `component = measurement_name`,
-#'   e.g. `c(PLS_Temp = "PLS_Temp")`. Only components named here get QC
-#'   columns merged in.
-#' @return `values` with `quality_level`/`qc_flag` columns added. Rows for
-#'   unmapped components (or with no matching QC row) get `NA` in both --
-#'   that's expected, not a merge failure.
+#' @param qc_map Named character vector: `component = measurement_name`.
+#' @return `values` with `quality_level`/`qc_flag` columns added.
 #' @export
 sn_join_qc <- function(values, qc_flags, qc_map) {
   unmapped <- setdiff(unique(values$variable), names(qc_map))
@@ -185,19 +196,15 @@ sn_join_qc <- function(values, qc_flags, qc_map) {
 
 #' Read values + QC flags for one or more stations
 #'
-#' The main entry point -- like `hc_read_daily_flows()` in hydrocan or
-#' `hy_daily_flows()` in tidyhydat, `site` accepts a vector so one call can
-#' cover several stations at once.
+#' The main API entry point -- `site` accepts a vector so one call can cover
+#' several stations.
 #'
 #' @param client A client from [sn_connect()].
 #' @param site Character vector of site codes.
 #' @param view Sample view name (recycled across all sites).
-#' @param components Character vector of component names (recycled across
-#'   all sites).
-#' @param qc_map Named character vector, `component = measurement_name`
-#'   (recycled across all sites) -- see [sn_join_qc()].
-#' @param start_date,end_date Date range as `"YYYY-MM-DD"` strings
-#'   (recycled across all sites).
+#' @param components Character vector of component names (recycled).
+#' @param qc_map Named character vector, `component = measurement_name`.
+#' @param start_date,end_date Date range as `"YYYY-MM-DD"` strings.
 #' @return A long tibble across all requested sites, with columns
 #'   `measurement_time`, `site`, `variable`, `value`, `quality_level`,
 #'   `qc_flag`.
@@ -235,18 +242,108 @@ sn_plot_station <- function(data) {
 
 
 # #############################################################################
-# B. qc_* -- pre-threshold diagnostics
+# B. stage_* -- local raw CSV loader (offline / reprocessing fallback)
+# #############################################################################
+# The Hakai network archives each sensor generation as a CSV under
+# 01_raw/<STATION>/. This block reads one of those files into the SAME long
+# shape sn_read_values() returns (measurement_time, site, variable, value),
+# so stage_qc_pipeline.R never has to know which source it came from.
+
+STAGE_RAW_HEADER_ROWS <- 4    # units / site / variable-code rows to skip
+STAGE_RAW_TZ          <- "Etc/GMT+8"   # PST, no DST
+
+STAGE_RAW_COLS <- c(
+  "timestamp", "year", "month", "water_year",
+  "stage_inst", "stage_avg", "stage_min", "stage_max", "stage_sd"
+)
+
+
+#' Read one raw sensor CSV into the long sn_read_values() shape
+#'
+#' @param sensor_id File stem of the raw CSV, e.g. `"ssn703_a"` (the file is
+#'   `<raw_dir>/<sensor_id>.csv`).
+#' @param raw_dir Directory holding the raw CSVs.
+#' @param variable Which burst statistic to return as `value`. Default
+#'   `"stage_avg"` -- the 5-min average, the primary QC value.
+#' @param site_label What to put in the returned `site` column. Defaults to
+#'   `sensor_id`.
+#' @return A long tibble: `measurement_time`, `site`, `variable`, `value`.
+#'   Empty tibble with those columns if the file is missing (with a message,
+#'   not an error -- mirrors sn_read_values()).
+#' @export
+stage_read_raw_csv <- function(sensor_id, raw_dir, variable = "stage_avg",
+                                site_label = sensor_id) {
+  file_path <- file.path(raw_dir, paste0(sensor_id, ".csv"))
+
+  if (!file.exists(file_path)) {
+    message(glue("No raw CSV at {file_path} -- returning an empty tibble."))
+    return(tibble(measurement_time = as.POSIXct(character()), site = character(),
+                   variable = character(), value = numeric()))
+  }
+
+  raw <- read_csv(
+    file_path,
+    skip      = STAGE_RAW_HEADER_ROWS,
+    col_names = STAGE_RAW_COLS,
+    col_types = cols(
+      timestamp  = col_character(),
+      year       = col_integer(),
+      month      = col_character(),
+      water_year = col_character(),
+      stage_inst = col_double(),
+      stage_avg  = col_double(),
+      stage_min  = col_double(),
+      stage_max  = col_double(),
+      stage_sd   = col_double()
+    ),
+    na = c("", "NA", "NaN")
+  )
+
+  if (!variable %in% names(raw)) {
+    stop("variable '", variable, "' not in raw file columns: ",
+         paste(names(raw), collapse = ", "))
+  }
+
+  raw %>%
+    transmute(
+      measurement_time = ymd_hms(timestamp, tz = STAGE_RAW_TZ),
+      site             = site_label,
+      variable         = variable,
+      value            = .data[[variable]]
+    ) %>%
+    arrange(measurement_time)
+}
+
+
+#' Read the sensor registry, one row per sensor_id
+#'
+#' Thin typed wrapper so callers get consistent column names for the join in
+#' run_stage_qc_*.R.
+#'
+#' @param registry_path Path to `sensor_registry.csv`.
+#' @param station Optional station_id to filter to.
+#' @return A tibble keyed on `site_id` (renamed from `sensor_id`).
+#' @export
+stage_read_registry <- function(registry_path, station = NULL) {
+  reg <- read_csv(registry_path, show_col_types = FALSE) %>%
+    rename(site_id = sensor_id)
+  if (!is.null(station)) reg <- reg %>% filter(station_id == station)
+  reg
+}
+
+
+# #############################################################################
+# C. qc_* -- pre-threshold diagnostics
 # #############################################################################
 # Run these BEFORE picking QC thresholds (spike rate, gap-size cutoffs).
+
 #' Summarise every gap in a raw series
 #'
-#' Identifies contiguous runs of `NA` in the raw value column and reports
-#' each one's duration.
+#' Contiguous runs of `NA` in the value column, one row per gap.
 #'
 #' @param data A tibble with a measurement_time and value column.
 #' @param measurement_time,value Bare (unquoted) column names.
-#' @return A tibble: one row per gap, with `start`, `end`,
-#'   `duration_mins`, `n_obs`.
+#' @return A tibble: `start`, `end`, `duration_mins`, `n_obs`.
 #' @export
 qc_summarise_gaps <- function(data, measurement_time = measurement_time, value = value) {
   data |>
@@ -273,11 +370,8 @@ qc_summarise_gaps <- function(data, measurement_time = measurement_time, value =
 #' Bin gap durations into a readable count table
 #'
 #' @param gaps A tibble from [qc_summarise_gaps()].
-#' @param breaks_mins Bin edges in minutes. Default covers 15 min to 2+
-#'   days -- adjust to whatever granularity is useful for this station.
-#' @return A tibble: `bin`, `n_gaps`, `total_mins` (sum of duration in
-#'   that bin -- useful for seeing which bin actually dominates the
-#'   record, not just which has the most individual gaps).
+#' @param breaks_mins Bin edges in minutes.
+#' @return A tibble: `bin`, `n_gaps`, `total_mins`.
 #' @export
 qc_gap_length_table <- function(gaps, breaks_mins = c(0, 15, 60, 180, 360, 720, 1440, 4320, Inf)) {
   gaps |>
@@ -290,15 +384,13 @@ qc_gap_length_table <- function(gaps, breaks_mins = c(0, 15, 60, 180, 360, 720, 
 
 #' Quantiles of point-to-point rate of change
 #'
-#' Time-weighted so it's meaningful across any sampling interval: change
-#' per hour, not per row.
+#' Time-weighted (change per hour, not per row) so it's comparable across
+#' any sampling interval.
 #'
 #' @param data A tibble with a measurement_time and value column.
 #' @param measurement_time,value Bare (unquoted) column names.
-#' @param probs Quantiles to report. Default covers the middle of the
-#'   distribution up through the extreme tail.
-#' @return A named numeric vector, one entry per requested quantile, in
-#'   the same units as `value` per hour.
+#' @param probs Quantiles to report.
+#' @return A named numeric vector, units of `value` per hour.
 #' @export
 qc_rate_of_change_quantiles <- function(data, measurement_time = measurement_time, value = value,
                                          probs = c(0.5, 0.75, 0.9, 0.95, 0.99, 0.999, 1)) {
@@ -314,12 +406,10 @@ qc_rate_of_change_quantiles <- function(data, measurement_time = measurement_tim
 }
 
 
-#' Quick histogram of rate of change, for a visual look
+#' Quick histogram of rate of change
 #'
 #' @inheritParams qc_rate_of_change_quantiles
-#' @param roc_max Optional upper x-axis cutoff, to zoom past the handful
-#'   of extreme outliers that otherwise crush the rest of the histogram
-#'   into one bar. Leave `NULL` to show everything.
+#' @param roc_max Optional upper x-axis cutoff.
 #' @return A ggplot object.
 #' @export
 qc_plot_roc_histogram <- function(data, measurement_time = measurement_time, value = value, roc_max = NULL) {
@@ -333,7 +423,7 @@ qc_plot_roc_histogram <- function(data, measurement_time = measurement_time, val
 
   p <- ggplot(df, aes(x = roc)) +
     geom_histogram(bins = 100, fill = "steelblue") +
-    labs(x = "|\u0394value| per hour", y = "count")
+    labs(x = "|Δvalue| per hour", y = "count")
 
   if (!is.null(roc_max)) p <- p + coord_cartesian(xlim = c(0, roc_max))
   p
@@ -341,35 +431,28 @@ qc_plot_roc_histogram <- function(data, measurement_time = measurement_time, val
 
 
 # #############################################################################
-# C. qc_plot_diagnostic() -- pre-flagging visual triage
+# D. qc_plot_diagnostic() / qc_plot_overlap() -- pre-flagging visual triage
 # #############################################################################
-# Meant to sit ahead of any flag-assignment logic (spike / flatline /
-# range / gap) -- not itself a QC/flagging function.
 
 #' Diagnostic plot for stage QC triage
 #'
-#' Three stacked, x-aligned panels: raw stage with existing QC flags
-#' overlaid (if present), rate-of-change to make spikes/jumps obvious, and
-#' an optional rolling min/max/std band to catch slow drift.
+#' Three stacked, x-aligned panels: raw stage with existing QC flags,
+#' rate-of-change, and an optional rolling min/max/std drift band.
 #'
-#' @param data A dataframe/tibble with at least a measurement_time and a
-#'   stage value column.
-#' @param measurement_time,value Bare (unquoted) column names. Defaults
-#'   assume columns literally named `measurement_time` and `stage`.
-#' @param flag Bare column name holding an existing QC flag, if any (e.g.
-#'   `qc_flag`). Optional -- leave `NULL` to skip overlay; if left `NULL`
-#'   and a column literally named `qc_flag` exists in `data`, it's used
-#'   automatically with a message telling you it did so.
-#' @param roll_window Rolling window width, in number of observations
-#'   (not time), for the drift band. Default `12` -- e.g. 1 hour of
-#'   5-minute data.
-#' @param show_rolling Include the rolling min/max/std panel? Default
-#'   `TRUE`.
-#' @param transition_dates Optional vector of dates/datetimes (or a
-#'   tibble with `date` and `label` columns) to mark with vertical
-#'   reference lines -- e.g. sensor generation swap dates.
-#' @param title Optional plot title, e.g. a station code.
-#' @return A `patchwork` object (stacked ggplots).
+#' @param data A tibble with at least a measurement_time and a stage value.
+#' @param measurement_time,value Bare (unquoted) column names.
+#' @param flag Bare column name of an existing QC flag, or `NULL`.
+#' @param roll_window Rolling window width in observations. Default `12`.
+#' @param show_rolling Include the rolling panel? Default `TRUE`.
+#' @param transition_dates Optional vector/tibble of dates to mark.
+#' @param title Optional plot title.
+#' @param value_label What the value axis is measuring, e.g. `"RH"`,
+#'   `"Air Temp"`, `"PLS_Lvl"` -- used for the main panel's y-axis and the
+#'   rate-of-change panel's (`"Δ{value_label} / hr"`). Default `"Stage"`
+#'   keeps this stage-only unless a caller says otherwise (the generic QC
+#'   scripts pass the resolved component name here so RH/temperature/etc
+#'   plots don't say "Stage").
+#' @return A `patchwork` object.
 #' @export
 qc_plot_diagnostic <- function(data,
                                 measurement_time = measurement_time,
@@ -378,7 +461,8 @@ qc_plot_diagnostic <- function(data,
                                 roll_window = 12,
                                 show_rolling = TRUE,
                                 transition_dates = NULL,
-                                title = NULL) {
+                                title = NULL,
+                                value_label = "Stage") {
 
   flag_quo <- rlang::enquo(flag)
   has_flag <- !rlang::quo_is_null(flag_quo)
@@ -425,12 +509,12 @@ qc_plot_diagnostic <- function(data,
       labs(color = "QC flag", shape = "QC flag")
   }
 
-  p_main <- p_main + labs(x = NULL, y = "Stage", title = title)
+  p_main <- p_main + labs(x = NULL, y = value_label, title = title)
 
   p_roc <- ggplot(df, aes(x = measurement_time, y = roc)) +
     geom_hline(yintercept = 0, color = "grey80") +
     geom_line(color = "steelblue", linewidth = 0.3) +
-    labs(x = NULL, y = "\u0394stage / hr")
+    labs(x = NULL, y = glue::glue("Δ{value_label} / hr"))
 
   panel_list <- list(p_main, p_roc)
   heights <- c(2, 1)
@@ -445,9 +529,6 @@ qc_plot_diagnostic <- function(data,
     heights <- c(heights, 1)
   }
 
-  # wrap_plots() rather than `/` -- recent ggplot2 (S7-based plot objects)
-  # can intercept `/` before patchwork's method resolves, depending on
-  # installed versions.
   panels <- patchwork::wrap_plots(panel_list, ncol = 1, heights = heights)
 
   if (!is.null(transition_dates)) {
@@ -468,22 +549,70 @@ qc_plot_diagnostic <- function(data,
 }
 
 
+#' Overlap plot for two co-located sensor generations
+#'
+#' Replaces the sensor-overlap / offset-vs-stage pages of the old
+#' 02_inspect_stage.R. Two stacked panels: the two raw series overlaid
+#' across the overlap window, and (failing - reference) vs reference stage,
+#' to eyeball whether a constant datum offset is a defensible model.
+#'
+#' @param data A long tibble (`measurement_time`, `site`, `value`) covering
+#'   both sensors -- e.g. bound rows of two [stage_read_raw_csv()] calls or a
+#'   filtered [sn_read_station()] result.
+#' @param failing,reference `site` values: the older sensor and its
+#'   replacement/datum reference.
+#' @param overlap_start,overlap_end POSIXct bounds of the overlap window.
+#' @param title Optional plot title.
+#' @return A `patchwork` object.
+#' @export
+qc_plot_overlap <- function(data, failing, reference,
+                             overlap_start = NULL, overlap_end = NULL,
+                             title = NULL) {
+
+  df <- data %>%
+    filter(site %in% c(failing, reference)) %>%
+    { if (!is.null(overlap_start)) filter(., measurement_time >= overlap_start) else . } %>%
+    { if (!is.null(overlap_end))   filter(., measurement_time <= overlap_end)   else . }
+
+  p_series <- ggplot(df, aes(measurement_time, value, colour = site)) +
+    geom_line(linewidth = 0.3, na.rm = TRUE, alpha = 0.85) +
+    labs(x = NULL, y = "Stage", colour = NULL, title = title) +
+    theme(legend.position = "bottom")
+
+  wide <- df %>%
+    select(measurement_time, site, value) %>%
+    pivot_wider(names_from = site, values_from = value) %>%
+    filter(!is.na(.data[[failing]]), !is.na(.data[[reference]])) %>%
+    mutate(offset = .data[[failing]] - .data[[reference]])
+
+  med_offset <- median(wide$offset, na.rm = TRUE)
+
+  p_offset <- ggplot(wide, aes(.data[[reference]], offset)) +
+    geom_point(size = 0.5, alpha = 0.35, colour = "steelblue") +
+    geom_hline(yintercept = 0, colour = "black", linewidth = 0.4) +
+    geom_hline(yintercept = med_offset, colour = "firebrick", linetype = "dashed") +
+    annotate("text", x = Inf, y = med_offset, hjust = 1.05, vjust = -0.5, size = 3,
+             colour = "firebrick",
+             label = glue("median offset ({failing} - {reference}) = {round(med_offset, 4)}")) +
+    labs(x = glue("{reference} stage (reference)"),
+         y = glue("{failing} - {reference}"))
+
+  patchwork::wrap_plots(list(p_series, p_offset), ncol = 1, heights = c(1, 1))
+}
+
+
 # #############################################################################
-# D. qc_* -- post-flagging review & verification
+# E. qc_* -- post-flagging review & verification
 # #############################################################################
-# Use these AFTER running the QC pipeline, to visually and numerically
-# confirm the flags/fills are doing what you expect.
 
 #' Identify contiguous adjusted time chunks
 #'
-#' Collapses consecutive rows sharing the same non-"raw" flag into single
-#' chunks, so you get one row per adjustment period instead of one row per
-#' observation.
+#' Collapses consecutive rows sharing the same non-"raw" flag into one row
+#' per adjustment period.
 #'
 #' @param data A tibble with measurement_time and flag columns.
 #' @param measurement_time,flag Bare (unquoted) column names.
-#' @param raw_value The flag value meaning "untouched" -- excluded from
-#'   chunks. Default `"raw"`.
+#' @param raw_value The flag value meaning "untouched". Default `"raw"`.
 #' @return A tibble: `flag`, `start`, `end`, `duration_mins`, `n_obs`.
 #' @export
 qc_summarise_chunks <- function(data, measurement_time = measurement_time, flag = qc_flag, raw_value = "raw") {
@@ -512,16 +641,13 @@ qc_summarise_chunks <- function(data, measurement_time = measurement_time, flag 
 
 #' Full-record QC review plot
 #'
-#' Raw values as a thin grey line, QC'd values overlaid in colour only
-#' where they differ from raw (i.e. wherever a flag applied), with
-#' adjusted chunks shaded in the background.
+#' Raw values as a thin grey line, QC'd values in colour only where they
+#' differ, adjusted chunks shaded.
 #'
-#' @param data A tibble with measurement_time, raw value, QC'd value, and
-#'   flag columns.
+#' @param data A tibble with measurement_time, raw value, QC'd value, flag.
 #' @param measurement_time,value,value_qc,flag Bare (unquoted) column names.
 #' @param raw_value The flag value meaning "untouched". Default `"raw"`.
-#' @param chunks Optional pre-computed chunk table from
-#'   [qc_summarise_chunks()] (computed automatically if not supplied).
+#' @param chunks Optional pre-computed [qc_summarise_chunks()] table.
 #' @return A ggplot object.
 #' @export
 qc_plot_review <- function(data, measurement_time = measurement_time, value = value,
@@ -568,14 +694,10 @@ qc_plot_review <- function(data, measurement_time = measurement_time, value = va
 
 #' Zoom into one QC chunk for close verification
 #'
-#' Shows raw vs QC'd value for a single adjustment period plus a buffer on
-#' either side.
-#'
 #' @param data As in [qc_plot_review()].
 #' @param measurement_time,value,value_qc,flag Bare (unquoted) column names.
 #' @param chunk A single row from [qc_summarise_chunks()].
-#' @param buffer_hours Context to show on either side of the chunk.
-#'   Default `6`.
+#' @param buffer_hours Context on either side. Default `6`.
 #' @return A ggplot object.
 #' @export
 qc_plot_chunk <- function(data, measurement_time = measurement_time, value = value,
@@ -612,15 +734,12 @@ qc_plot_chunk <- function(data, measurement_time = measurement_time, value = val
 
 #' Interactive QC plot (WebGL, performance-focused)
 #'
-#' Like [qc_plot_review()] but interactive via plotly. Built directly with
-#' `plot_ly()` rather than `ggplotly()`, since converting a ggplot tends
-#' to bog down on long 5-minute-interval records. Uses `scattergl` (WebGL)
-#' and disables hover on the raw line entirely, since hover-target
-#' computation (not rendering) is usually the real bottleneck on a long
-#' series -- only the flagged points get hover text.
+#' Like [qc_plot_review()] but interactive via plotly. Built with
+#' `plot_ly()` directly (not `ggplotly()`) and `scattergl`, with hover
+#' disabled on the raw line, so it stays responsive on multi-year 5-minute
+#' records.
 #'
-#' @param data A tibble with measurement_time, raw value, QC'd value, and
-#'   flag columns.
+#' @param data A tibble with measurement_time, raw value, QC'd value, flag.
 #' @param measurement_time,value,value_qc,flag Bare (unquoted) column names.
 #' @param raw_value The flag value meaning "untouched". Default `"raw"`.
 #' @return A `plotly` object.
@@ -665,23 +784,12 @@ qc_plot_interactive <- function(data, measurement_time = measurement_time, value
 
 #' Verify gap-fill flags line up with real transmission gaps
 #'
-#' Cross-checks every gap-fill-flagged point against the actual
-#' transmission gaps in the raw data (via [qc_summarise_gaps()]), and
-#' reports how each real gap was resolved. 
-#'
-#' @param pls_raw Raw values tibble (before QC), with measurement_time/value.
-#' @param pls_qc QC'd tibble (after the pipeline), with measurement_time
-#'   and qc_flag.
+#' @param pls_raw Raw values tibble (before QC), measurement_time/value.
+#' @param pls_qc QC'd tibble (after the pipeline), measurement_time/qc_flag.
 #' @param measurement_time,value,qc_flag Bare (unquoted) column names.
-#' @param fill_flags Which `qc_flag` values count as "filled via gap-fill
-#'   logic" and should be checked against real gaps. Default covers the
-#'   standard `gf_*` names used in `pls_qc_workflow.R`.
-#' @return A list with two tibbles: `gap_audit` (one row per real gap,
-#'   showing how it was resolved) and `mismatches` (any fill-flagged
-#'   points that do NOT fall inside a real gap -- should normally be
-#'   empty; non-empty means something is being filled that isn't a real
-#'   gap, worth investigating). Also prints a message/warning summarising
-#'   the result.
+#' @param fill_flags Which `qc_flag` values count as gap-fill.
+#' @return A list: `gap_audit` (one row per real gap) and `mismatches`
+#'   (fill-flagged points NOT inside a real gap -- normally empty).
 #' @export
 qc_verify_gap_fill <- function(pls_raw, pls_qc, measurement_time = measurement_time,
                                 value = value, qc_flag = qc_flag,
@@ -727,17 +835,9 @@ qc_verify_gap_fill <- function(pls_raw, pls_qc, measurement_time = measurement_t
 
 #' Compare summary statistics before and after QC
 #'
-#' Side-by-side stats for the raw value and the QC'd value, so you can see
-#' at a glance whether QC shifted the distribution in a way that looks
-#' reasonable (e.g. a slightly narrower range after spike/range removal)
-#' or in a way that looks wrong (a big shift in the mean, a much wider
-#' range, etc).
-#'
 #' @param data A tibble with a raw value and a QC'd value column.
 #' @param value,value_qc Bare (unquoted) column names.
-#' @return A tibble with one row per statistic (`n`, `n_missing`, `mean`,
-#'   `median`, `sd`, `min`, `max`) and one column per series (`raw`,
-#'   `qc`), plus a `diff` column (`qc - raw`) for the numeric stats.
+#' @return A tibble: one row per statistic, columns `raw`, `qc`, `diff`.
 #' @export
 qc_compare_summary <- function(data, value = value, value_qc = value_qc) {
   df <- data |> transmute(value = {{ value }}, value_qc = {{ value_qc }})
@@ -763,19 +863,12 @@ qc_compare_summary <- function(data, value = value, value_qc = value_qc) {
 
 #' Check for unexpected missing values in the QC'd series
 #'
-#' A QC'd value should only be `NA` where the flag says so (an
-#' `unfilled_*` flag, meaning genuinely left as MV). Any `NA` under a
-#' different flag would mean something upstream in the pipeline is
-#' silently dropping a value it should have filled or left untouched --
-#' worth investigating, not expected behaviour.
+#' A QC'd value should only be `NA` under an `unfilled_*` flag. Anything
+#' else means the pipeline is silently dropping a value.
 #'
 #' @param data A tibble with a QC'd value and a flag column.
 #' @param value_qc,qc_flag Bare (unquoted) column names.
-#' @return A tibble: one row per `qc_flag` category, with `n` (total rows)
-#'   and `n_missing` (how many have `NA` in `value_qc`). Also prints a
-#'   message/warning: clean if every `n_missing` outside `unfilled_*`
-#'   categories is `0`, a warning otherwise naming which categories have
-#'   unexpected gaps.
+#' @return A tibble: one row per `qc_flag`, with `n` and `n_missing`.
 #' @export
 qc_check_missing <- function(data, value_qc = value_qc, qc_flag = qc_flag) {
   df <- data |> transmute(value_qc = {{ value_qc }}, qc_flag = {{ qc_flag }})
@@ -798,30 +891,3 @@ qc_check_missing <- function(data, value_qc = value_qc, qc_flag = qc_flag) {
 
   by_flag
 }
-
-
-# =============================================================================
-# runs
-# =============================================================================
- client <- sn_connect()
-#
- pls_raw <- sn_read_values(client, "SSN703US", "5minuteSamples", "PLS3_Lvl",
-                            start_date = "2018-09-14", end_date = "2023-08-03")
- sa_raw  <- sn_read_values(client, "SA_WTS703_PT", "5minuteSamples", "SensorDepth_Avg",
-                            start_date = "2018-09-14", end_date = "2023-08-03")
-#
-# # Pre-threshold diagnostics:
- gaps <- qc_summarise_gaps(pls_raw, measurement_time, value)
- qc_gap_length_table(gaps)
- qc_rate_of_change_quantiles(pls_raw, measurement_time, value)
- qc_plot_roc_histogram(pls_raw, measurement_time, value, roc_max = 2)
-#
-# # Run pls_qc_workflow.R using pls_raw/sa_raw, producing `pls` and `pls_for_db` ...
-#
-# # Post-flagging review:
-# chunks <- qc_summarise_chunks(pls, measurement_time, qc_flag)
-# qc_plot_review(pls, measurement_time, value, value_qc, qc_flag, chunks = chunks)
-# qc_plot_interactive(pls, measurement_time, value, value_qc, qc_flag)
-# qc_verify_gap_fill(pls_raw, pls, measurement_time, value, qc_flag)
-# qc_compare_summary(pls, value, value_qc)
-# qc_check_missing(pls, value_qc, qc_flag)

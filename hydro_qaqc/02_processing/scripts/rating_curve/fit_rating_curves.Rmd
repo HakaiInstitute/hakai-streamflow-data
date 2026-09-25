@@ -1,0 +1,791 @@
+---
+title: "SSN703 Rating Curve Development -- RC2 & RC3"
+author: "Emily Haughton"
+date: "`r Sys.Date()`"
+# All paths in this doc are relative to the PROJECT ROOT (the folder with
+# hydro_qaqc.Rproj). This handler forces the knit to run from there, so the
+# RStudio Knit button works regardless of the "Knit Directory" setting.
+knit: >
+  (function(input, ...) rmarkdown::render(
+    input, knit_root_dir = rprojroot::find_rstudio_root_file(), ...))
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+
+# Belt-and-suspenders for the project-root path assumption: the YAML `knit:`
+# handler covers the RStudio Knit button; this covers a bare
+# rmarkdown::render() / knit(), which ignores that field.
+if (!file.exists("02_processing/scripts/rating_curve/rating_curve_functions.R")) {
+  .root <- rprojroot::find_rstudio_root_file()
+  knitr::opts_knit$set(root.dir = .root)
+  setwd(.root)
+}
+
+library(tidyverse)
+library(plotly)
+library(htmlwidgets)
+
+select <- dplyr::select
+
+# All LOESS / power-law / extrapolation / CI machinery lives here now.
+# (Was six of the colleague's scripts -- selectspan / interp1 / interp2 /
+# HQ_unc / CI / CI_model_input -- plus code inlined in this doc and patched
+# three times for row misalignment. rc_stage_uncertainty() and
+# rc_bootstrap_ci() return KEYED tibbles, so those three FIX blocks are gone.)
+source("02_processing/scripts/rating_curve/rating_curve_functions.R")
+
+out_dir        <- "04_outputs"
+per_sensor_dir <- "04_outputs/per_sensor"   # QC'd per-sensor stage, for the RC2 low-end target
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+N_BOOT <- 500
+
+# CI widening for extrapolated segments (RC2 low end, RC3 low end)
+CI_MULTIPLIER_CAP <- 3   # CI at h0 is up to 3x the anchor's own width
+CI_GROWTH_POWER   <- 2   # widening accelerates toward h0
+```
+
+```{r load_data, include=FALSE}
+# Stage_avg = Stage_avg_corrected throughout (the prepped table's datum-
+# corrected column). RC1 is now on MK's ssn703_a datum (prep_gaugings.R adds
+# NO offset). RC2 / RC3 are separate locations (loc_2 / loc_3) and unaffected
+# by any RC1 datum choice.
+
+gaugings_all <- read_csv(file.path("03_docs/metadata/ssn703_gaugings_prepped.csv"),
+                         show_col_types = FALSE) |>
+  filter(!is.na(Q_meas)) |>
+  mutate(
+    Stage_avg = Stage_avg_corrected,
+    Q_abs_unc = Q_rel_unc / 100 * Q_meas,
+    datetime  = as.Date(datetime)
+  )
+
+# Event_no is added by rating_curve/prep_gaugings.R. Older prepped tables lack
+# it -- fall back to a placeholder so the RC3 Event-63 exclusion is a no-op
+# rather than an error. (Run prep_gaugings.R first for the real exclusion.)
+if (!"Event_no" %in% names(gaugings_all)) {
+  warning("prepped table has no Event_no column -- run rating_curve/prep_gaugings.R. ",
+          "The RC3 Event-63 exclusion will not apply.")
+  gaugings_all$Event_no <- NA_integer_
+}
+
+ratingcurve_v4 <- read_csv("03_docs/metadata/ssn703_RC1_lookup_v_previous.csv",
+                           show_col_types = FALSE)
+rc_v4_r3 <- ratingcurve_v4 |> filter(Rating == 3) |> select(Stage_avg, Q_model)
+
+# RC2 / RC3 fit sets are APPROVAL-GATED: they use only the gaugings Emily has
+# set final_rating == "Y" in 03_docs/metadata/ssn703_rating_approvals.csv
+# (reviewed in the "Gauging review" section below, then edited by hand).
+# prep_gaugings.R propagates that column into Final_rating_curve here. The seed
+# state of the approval file == the old auto-filter fit set (RC2: stage ok &
+# WY != 2020-2021; RC3: stage ok & not the Event-63 ~121 cm gauging), so
+# nothing changes until the file is edited.
+#
+# If the approval file does not exist yet, fall back to the old auto-filters
+# with a warning.
+approvals_path <- "03_docs/metadata/ssn703_rating_approvals.csv"
+use_approvals  <- file.exists(approvals_path)
+
+if (use_approvals) {
+  HQ_RC2 <- gaugings_all |> filter(rating_curve_period == "RC2", Final_rating_curve == "Y")
+  HQ_RC3 <- gaugings_all |> filter(rating_curve_period == "RC3", Final_rating_curve == "Y")
+} else {
+  warning("No ssn703_rating_approvals.csv -- using legacy auto-filters. ",
+          "Run rating_curve/prep_gaugings.R to generate the approval file.")
+  HQ_RC2 <- gaugings_all |>
+    filter(rating_curve_period == "RC2", stage_status == "ok", WY != "2020-2021")
+  HQ_RC3 <- gaugings_all |>
+    filter(rating_curve_period == "RC3", stage_status == "ok") |>
+    filter(!(coalesce(Event_no, -1L) == 63 & Stage_avg > 120 & Stage_avg < 122))
+}
+
+stopifnot("no RC2 gaugings after filtering -- check approvals / prepped table" = nrow(HQ_RC2) > 3,
+          "no RC3 gaugings after filtering -- check approvals / prepped table" = nrow(HQ_RC3) > 3)
+```
+
+## Background
+
+| Rating | Sensor | Location | Applied from | Notes |
+|:--|:--|:--|:--|:--|
+| RC2 (Rating 4) | ssn703_c | loc_2 | 2018-09-14 | database switched to sensor C on this date; fit on all stage-bearing RC2 gaugings incl. WY2020-2021 (see temporal-shift note) |
+| RC3 (Rating 5) | ssn703_d | loc_3 | 2023-09-15 | sensor D installed 2021-09-02, but database didn't switch stage source to it until this date |
+
+**Datum:** RC1 (the previous pipeline, Ratings 1-3, loc_1) is on MK's ssn703_a
+reference datum -- see `memory/mk-rc1-stage-provenance.md` and
+`rating_curve/recreate_mk_curve.R`. RC2 and RC3 are physically separate
+locations with their own rating-curve periods; the RC1 datum convention does
+not touch them. The discharge record before 2018-09-14 is already computed by
+the previous pipeline and is not modified here.
+
+**Key exclusions:** stage_suspect window 2023-06-25 to 2023-09-15; RC3 Event 63
+~121 cm gauging; the 2020-09-23 RC2 gauging (Q 10.2 at 93.5 cm -- ~4x its
+neighbours, physically inconsistent). RC2's 15 WY2020-2021 `stage_missing`
+gaugings stay out by necessity (no stage to fit on).
+
+**RC2 temporal shift:** the 11 WY2020-2021 gaugings that *do* have stage were
+added back to the RC2 fit on 2026-09-10 (`final_rating == "Y"`) because that
+water year is the transition of a real stage-discharge shift at loc_2 -- the
+gaugings drift from ~-18% (2018-2020) to ~+8% (2021-2023) against a single
+pooled curve. See the **Residual diagnostics** tab under RC2. A pooled curve
+cannot fit both ends; segmenting RC2 (or a time-varying shift correction) is
+the open decision.
+
+---
+
+## Gauging review {.tabset}
+
+The RC2 and RC3 curves are fit on the gaugings flagged `final_rating == "Y"` in
+`03_docs/metadata/ssn703_rating_approvals.csv` (RC1 uses the same flag in
+`compare_rc1_rc2.R`). **To change what a curve is fit on:** review the plots
+here, edit `final_rating` (Y/N) in that CSV -- `reviewed` and `review_note` are
+yours to annotate -- then re-run `prep_gaugings.R` and re-knit this document.
+Green = currently included, red = excluded. Hover for Event no., date, the seed
+basis, and your note.
+
+```{r review_setup, include=FALSE}
+review_tbl <- if (use_approvals) {
+  read_csv(approvals_path, show_col_types = FALSE,
+           col_types = cols(.default = col_character())) |>
+    mutate(across(any_of(c("Stage_avg_corrected", "Q_meas", "Q_rel_unc", "stage_change_cm")),
+                  as.numeric))
+} else NULL
+
+# PLS4-reassigned gaugings (RC3 stage rebuilt from ssn703_d after the RC2/RC3
+# boundary moved to 2021-09-02 -- see
+# 03_docs/decisions/ssn703_pls3_pls4_rc_boundary.md) get their own colours in
+# the review plot so they're visually distinct: their stage moved (typically
+# +5 to +15 cm) relative to what earlier fits/approvals saw.
+review_group_pal <- c(
+  "Y"                   = "#1B7837",
+  "N"                   = "#B2182B",
+  "Y (PLS4 reassigned)" = "#2166AC",
+  "N (PLS4 reassigned)" = "#F4A582"
+)
+
+rc_review_plot <- function(period) {
+  if (is.null(review_tbl))
+    return(htmltools::HTML("<em>No approval file yet -- run prep_gaugings.R.</em>"))
+  d <- review_tbl |>
+    filter(rating_curve_period == period, !is.na(Q_meas), !is.na(Stage_avg_corrected)) |>
+    mutate(
+      pls4_reassigned = !is.na(stage_source) & stage_source == "pls4_reassigned",
+      review_group = if_else(pls4_reassigned,
+                              paste0(final_rating, " (PLS4 reassigned)"),
+                              final_rating)
+    )
+  if (!nrow(d)) return(htmltools::HTML(paste0("<em>No ", period, " gaugings.</em>")))
+  ggplotly(
+    ggplot(d, aes(Stage_avg_corrected, Q_meas, colour = review_group,
+                  label = paste0("Event ", Event_no, " | ", Date,
+                                 " | basis ", final_rating_basis,
+                                 " | reviewed ", reviewed,
+                                 if_else(pls4_reassigned,
+                                         case_when(
+                                           is.na(stage_change_cm) ~
+                                             " | PLS4 reassigned, stage newly available (previously no stage)",
+                                           stage_change_cm >= 0 ~
+                                             paste0(" | PLS4 reassigned, stage +", stage_change_cm, " cm vs. prior"),
+                                           TRUE ~
+                                             paste0(" | PLS4 reassigned, stage ", stage_change_cm, " cm vs. prior")
+                                         ),
+                                         ""),
+                                 if_else(is.na(review_note), "", paste0(" | ", review_note))))) +
+      geom_point(size = 2.4, alpha = 0.9) +
+      scale_colour_manual(values = review_group_pal, drop = FALSE) +
+      theme_bw() + xlab("Stage corrected (cm)") + ylab("Discharge (m3/s)") +
+      labs(title = paste0(period, " -- current approval state"), colour = "final_rating")
+  )
+}
+
+rc_review_excluded <- function(period) {
+  if (is.null(review_tbl)) return(invisible(NULL))
+  review_tbl |>
+    filter(rating_curve_period == period, final_rating != "Y") |>
+    select(Event_no, Date, Stage_avg_corrected, Q_meas, stage_status, stage_source,
+           final_rating_basis, reviewed, review_note) |>
+    arrange(Date) |>
+    knitr::kable(caption = paste0(period, " -- gaugings currently excluded (final_rating != \"Y\")"))
+}
+```
+
+### RC1
+```{r review_rc1}
+rc_review_plot("RC1")
+```
+```{r review_rc1_tbl}
+rc_review_excluded("RC1")
+```
+
+### RC2
+```{r review_rc2}
+rc_review_plot("RC2")
+```
+```{r review_rc2_tbl}
+rc_review_excluded("RC2")
+```
+
+### RC3
+```{r review_rc3}
+rc_review_plot("RC3")
+```
+```{r review_rc3_tbl}
+rc_review_excluded("RC3")
+```
+
+---
+
+## Diagnostic -- all post-RC1 gaugings vs previous Rating 3 curve
+
+_Every gauging after RC1 (current RC2 + RC3 assignment, any approval status,
+any Old_New), as one block, against the pre-split v4 Rating 3 curve --
+for Emily to assess by eye where (if anywhere) a real break sits, now that
+the RC2/RC3 boundary itself has moved (see
+03_docs/decisions/ssn703_pls3_pls4_rc_boundary.md). Colour = current
+rating_curve_period assignment (not a judgement -- just where prep_gaugings.R
+currently draws the line); shape = current final_rating. Stage is the
+corrected value (PLS4-reassigned where applicable)._
+
+```{r diagnostic}
+post_rc1_diag <- gaugings_all |>
+  filter(rating_curve_period %in% c("RC2", "RC3"), stage_status == "ok")
+
+ggplotly(
+  ggplot() +
+    geom_line(data = rc_v4_r3, aes(Stage_avg, Q_model), colour = "black", linetype = "dashed") +
+    geom_pointrange(data = post_rc1_diag,
+                    aes(Stage_avg, Q_meas, ymin = Q_meas - Q_abs_unc, ymax = Q_meas + Q_abs_unc,
+                        colour = rating_curve_period, shape = Final_rating_curve,
+                        label = paste0("Event ", Event_no, " | ", datetime,
+                                       " | ", rating_curve_period,
+                                       " | stage_source ", stage_source,
+                                       " | Old_New ", Old_New,
+                                       " | final_rating ", Final_rating_curve,
+                                       " | Q ", round(Q_meas, 3))),
+                    size = 0.4) +
+    theme_bw() + xlab("Stage corrected (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = "All post-RC1 gaugings vs previous Rating 3 curve",
+         subtitle = "dashed = v4 Rating 3 -- coloured by current RC2/RC3 assignment, shaped by final_rating",
+         colour = "rating_curve_period", shape = "final_rating")
+)
+```
+
+---
+
+## RC2 -- loc_2 {.tabset}
+
+_`r nrow(HQ_RC2)` gaugings used. No previous curve for this location._
+
+### Data assessment {.tabset}
+
+#### Overview
+```{r rc2_overview}
+ggplotly(ggplot(HQ_RC2, aes(Stage_avg, Q_meas, fill = Old_New,
+                            label = paste0("Event ", Event_no, " | ", datetime))) +
+  geom_point(shape = 21, size = 2) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC2 -- all gaugings"))
+```
+
+#### By water year
+```{r rc2_wy}
+ggplotly(ggplot(HQ_RC2, aes(Stage_avg, Q_meas, fill = factor(WY),
+                            label = paste0("Event ", Event_no, " | ", datetime))) +
+  geom_point(shape = 21, size = 2) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC2 -- by water year", fill = "WY"))
+```
+
+#### With uncertainty
+```{r rc2_unc}
+ggplotly(ggplot(HQ_RC2, aes(Stage_avg, Q_meas, ymin = Q_meas - Q_abs_unc, ymax = Q_meas + Q_abs_unc,
+                            colour = Old_New, label = paste0("Event ", Event_no))) +
+  geom_pointrange(size = 0.4) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC2 -- with uncertainty"))
+```
+
+#### Hysteresis
+```{r rc2_hyst}
+ggplotly(ggplot(HQ_RC2, aes(Stage_avg, Q_meas, fill = Stage_delta,
+                            label = paste0("Event ", Event_no))) +
+  geom_point(shape = 21, size = 2) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC2 -- hysteresis", fill = "R/F/C"))
+```
+
+### LOESS span selection
+
+```{r rc2_span}
+rc2_spans <- rc_loess_spans(HQ_RC2, c(0.3, 0.4, 0.5))
+
+ggplotly(
+  ggplot() +
+    geom_pointrange(data = HQ_RC2, aes(Stage_avg, Q_meas,
+                    ymin = Q_meas - Q_abs_unc, ymax = Q_meas + Q_abs_unc, label = Event_no), size = 0.4) +
+    geom_line(data = rc2_spans, aes(Stage_avg, Q_model, colour = span)) +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC2 -- LOESS span selection")
+)
+```
+
+```{r rc2_span_choose, include=FALSE}
+## ACTION REQUIRED: chosen LOESS span for RC2
+RC2_SPAN <- 0.4
+
+Rating_RC2 <- rc_loess_curve(HQ_RC2, RC2_SPAN, sort(unique(HQ_RC2$Stage_avg)))
+```
+
+### Extrapolation and final curve
+
+```{r rc2_extrap, include=FALSE}
+## ACTION REQUIRED: gaugings at/above this stage fit the high-end power law.
+## This controls the FIT only -- the plotted curve switches from LOESS to
+## power law at the highest gauged stage (RC2_max_loess).
+RC2_INFLECTION <- 150
+
+RC2_max_loess <- max(Rating_RC2$Stage_avg)
+RC2_min_loess <- min(Rating_RC2$Stage_avg)
+
+# -- high-end power law, anchored to the LOESS end --
+fit_RC2   <- rc_fit_powerlaw(HQ_RC2, min_stage = RC2_INFLECTION)
+RC2_high  <- rc_extrapolate_high(Rating_RC2, fit_RC2, cap_stage = 218, step = 1)
+
+# -- low-end extension: reuse the high-end exponent, solve a analytically,
+#    extend down to ssn703_c's true recorded minimum (not just lowest gauged) --
+# Robust low-end target: the 0.05th percentile of the QC'd raw ssn703_c
+# stage, not the single lowest reading. One stray artifact that squeaks past
+# the QC range check (range_min is only 0.02 m) would otherwise drag the
+# extrapolation target tens of cm too low. Also floored at a sane value.
+# NOTE: if this comes back well below the handoff's "~32.5 cm true minimum",
+# the ssn703_c QC range_min needs tightening (stage_qc/run_stage_qc_ssn703.R).
+LOW_END_FLOOR_CM <- 25
+get_sensor_stage_range <- function(sensor_id) {
+  f <- file.path(per_sensor_dir, paste0("ssn703_ssn703_", sensor_id, "_stage_qc.csv"))
+  if (!file.exists(f)) stop("No QC file for ssn703_", sensor_id, " at ", f)
+  s <- read_csv(f, show_col_types = FALSE) |>
+    filter(qc_flag == "raw", !is.na(stage_corrected)) |> pull(stage_corrected)
+  tibble(min_cm      = max(quantile(s, 0.0005, names = FALSE) * 100, LOW_END_FLOOR_CM),
+         abs_min_cm  = min(s) * 100,
+         max_cm      = max(s) * 100, n = length(s))
+}
+ssn703c_range        <- get_sensor_stage_range("c")
+message("ssn703_c raw stage: absolute min ", round(ssn703c_range$abs_min_cm, 1),
+        " cm, robust low-end target ", round(ssn703c_range$min_cm, 1), " cm")
+RC2_min_raw_stage_cm <- ssn703c_range$min_cm
+h0_RC2_low           <- RC2_min_raw_stage_cm * 0.9
+
+RC2_low <- rc_extrapolate_low(Rating_RC2, target_min = RC2_min_raw_stage_cm,
+                              b = fit_RC2$b, h0 = h0_RC2_low, step = 1)
+
+Rating_RC2_full <- bind_rows(RC2_low, Rating_RC2, RC2_high) |> arrange(Stage_avg)
+Rating_RC2_interp <- rc_interp_grid(Rating_RC2_full, step = 0.1)
+```
+
+- **High-end fit** (gaugings >= `r RC2_INFLECTION` cm): a = `r round(fit_RC2$a, 4)`,
+  b = `r round(fit_RC2$b, 4)`, h0 = `r round(fit_RC2$h0, 1)` cm.
+- **Low-end extension** (no gaugings): reuses b = `r round(fit_RC2$b, 4)`; a solved
+  so the curve passes through the LOESS value at `r round(RC2_min_loess, 1)` cm;
+  derived h0 = `r round(h0_RC2_low, 1)` cm; extends to `r round(RC2_min_raw_stage_cm, 1)` cm
+  (ssn703_c's lowest recorded stage).
+- Curve is continuous across both joins, not co-fitted across them.
+
+```{r rc2_extrap_plot}
+ggplotly(
+  ggplot(Rating_RC2_interp, aes(Stage_avg, Q_model)) +
+    geom_vline(xintercept = c(RC2_min_loess, RC2_max_loess), linetype = "dotted", colour = "grey60") +
+    geom_line(data = ~ filter(.x, Stage_avg <= RC2_min_loess), colour = "#377EB8") +
+    geom_line(data = ~ filter(.x, Stage_avg >= RC2_min_loess, Stage_avg <= RC2_max_loess), colour = "black") +
+    geom_line(data = ~ filter(.x, Stage_avg >= RC2_max_loess), colour = "red") +
+    geom_point(data = HQ_RC2, aes(Stage_avg, Q_meas), size = 2) +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = "RC2 -- LOESS with anchored power-law extrapolation (both ends)",
+         subtitle = "blue = low extrapolation (no gaugings), black = LOESS/gauged, red = high extrapolation")
+)
+```
+
+```{r rc2_ci, include=FALSE}
+# Bootstrap CI on the LOESS range -- keyed to the gauged-stage grid, no
+# row-order rebuild needed (this is where the old three FIX blocks were).
+curve_fn_RC2 <- approxfun(Rating_RC2_interp$Stage_avg, Rating_RC2_interp$Q_model, rule = 2)
+HQ_RC2_unc   <- rc_stage_uncertainty(HQ_RC2, curve_fn_RC2)
+
+RC2_ci_loess <- rc_bootstrap_ci(HQ_RC2_unc, stage_grid = Rating_RC2$Stage_avg,
+                                span = RC2_SPAN, n_boot = N_BOOT)
+
+RatingCI_RC2 <- Rating_RC2 |>
+  distinct(Stage_avg, .keep_all = TRUE) |>
+  left_join(RC2_ci_loess |> distinct(Stage_avg, .keep_all = TRUE), by = "Stage_avg")
+
+# -- extrapolated-CI anchors (relative half-width + absolute floor at each join) --
+rc2_ci_pct_high <- {
+  w <- RatingCI_RC2 |> filter(Stage_avg == RC2_max_loess) |>
+    summarise(w = (Max_CI - Min_CI) / (2 * Q_model)) |> pull(w)
+  if (length(w) == 0 || is.na(w)) 0.1 else w
+}
+# robust low-end anchor: median CI% over the lowest ~10 cm of real LOESS
+rc2_ci_pct_low <- RatingCI_RC2 |>
+  filter(Stage_avg >= RC2_min_loess, Stage_avg <= RC2_min_loess + 10) |>
+  summarise(p = median((Max_CI - Min_CI) / (2 * Q_model), na.rm = TRUE)) |> pull(p)
+rc2_ci_pct_low <- ifelse(is.na(rc2_ci_pct_low), rc2_ci_pct_high, rc2_ci_pct_low)
+
+rc2_floor_high <- median(HQ_RC2$Q_abs_unc[HQ_RC2$Stage_avg >= RC2_max_loess - 20], na.rm = TRUE)
+rc2_floor_low  <- median(HQ_RC2$Q_abs_unc[HQ_RC2$Stage_avg <= RC2_min_loess + 10], na.rm = TRUE)
+if (is.na(rc2_floor_high)) rc2_floor_high <- 0
+if (is.na(rc2_floor_low))  rc2_floor_low  <- 0
+
+RC2_high_ci <- rc_extrapolated_ci(RC2_high, anchor_stage = RC2_max_loess,
+                                  h0 = 218, anchor_ci_pct = rc2_ci_pct_high,
+                                  floor_abs = rc2_floor_high,
+                                  mult_cap = 1, growth_power = CI_GROWTH_POWER)  # flat % above the anchor
+RC2_low_ci <- rc_extrapolated_ci(RC2_low, anchor_stage = RC2_min_loess,
+                                 h0 = h0_RC2_low, anchor_ci_pct = rc2_ci_pct_low,
+                                 floor_abs = rc2_floor_low,
+                                 mult_cap = CI_MULTIPLIER_CAP, growth_power = CI_GROWTH_POWER)
+
+RatingCI_RC2_full   <- bind_rows(RC2_low_ci, RatingCI_RC2, RC2_high_ci) |> arrange(Stage_avg)
+RatingCI_RC2_interp <- rc_interp_grid(RatingCI_RC2_full, step = 0.1)
+```
+
+```{r rc2_final_plot}
+ggplotly(
+  ggplot(RatingCI_RC2_interp, aes(Stage_avg)) +
+    geom_ribbon(aes(ymin = Min_CI, ymax = Max_CI), fill = "grey80") +
+    geom_pointrange(data = HQ_RC2_unc, aes(Stage_avg, Q_meas, ymin = Q_min, ymax = Q_max), size = 0.4) +
+    geom_line(aes(y = Q_model), colour = "#333333") +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = "SSN703 RC2 -- final rating curve v1")
+)
+```
+
+```{r rc2_final_plot_zoom}
+ggplotly(
+  ggplot(RatingCI_RC2_interp |> filter(Stage_avg <= RC2_min_loess + 30), aes(Stage_avg)) +
+    geom_ribbon(aes(ymin = Min_CI, ymax = Max_CI), fill = "grey70") +
+    geom_pointrange(data = HQ_RC2_unc |> filter(Stage_avg <= RC2_min_loess + 30),
+                    aes(Stage_avg, Q_meas, ymin = Q_min, ymax = Q_max), size = 0.4) +
+    geom_line(aes(y = Q_model), colour = "#333333") +
+    geom_vline(xintercept = RC2_min_loess, linetype = "dotted", colour = "grey50") +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = "SSN703 RC2 -- low-flow tail (zoomed)",
+         subtitle = "below the dotted line: floored, widening CI -- no gaugings support this range")
+)
+```
+
+### Residual diagnostics -- temporal shift {.tabset}
+
+_Does one pooled curve fit the whole RC2 period? These panels check the gauging
+residuals `(Q_meas - Q_curve) / Q_curve` for **time structure**. Random scatter
+=> one curve is fine. A coherent drift => the stage-discharge relationship at
+loc_2 moved, and no single curve fits both ends -- that is the case for RC2.
+The WY2020-2021 gaugings (added to the fit 2026-09-10) are the transition and
+are drawn in their own colour._
+
+```{r rc2_resid_setup, include=FALSE}
+## Era split for the early/late comparison. WY2020-2021 = transition, shown as
+## points only (not used to fit either era curve).
+RC2_ERA_EARLY_END  <- as.Date("2020-10-01")
+RC2_ERA_LATE_START <- as.Date("2021-10-01")
+
+rc2_resid <- HQ_RC2 |>
+  filter(!is.na(Stage_avg), !is.na(Q_meas)) |>
+  mutate(
+    Q_curve   = curve_fn_RC2(Stage_avg),
+    resid_pct = (Q_meas - Q_curve) / Q_curve * 100,
+    era = case_when(
+      datetime <  RC2_ERA_EARLY_END  ~ "early (pre-WY2021)",
+      datetime >= RC2_ERA_LATE_START ~ "late (WY2022+)",
+      TRUE                           ~ "transition (WY2021)"
+    )
+  ) |>
+  arrange(datetime)
+
+rc2_resid_by_wy <- rc2_resid |>
+  group_by(WY) |>
+  summarise(n = n(),
+            median_resid_pct = round(median(resid_pct), 1),
+            mean_resid_pct   = round(mean(resid_pct), 1),
+            IQR_pct          = round(IQR(resid_pct), 1),
+            stage_range_cm   = paste0(round(min(Stage_avg)), "-", round(max(Stage_avg))),
+            .groups = "drop")
+
+era_pal <- c("early (pre-WY2021)"   = "#377EB8",
+             "transition (WY2021)"  = "#984EA3",
+             "late (WY2022+)"       = "#E41A1C")
+
+# Separate LOESS per era, on the shared gauged-stage range, WY2021 held out.
+rc2_era_curve <- function(era_label) {
+  d <- rc2_resid |> filter(era == era_label)
+  if (nrow(d) < 6) return(NULL)
+  lo <- max(min(d$Stage_avg), RC2_min_loess)
+  hi <- min(max(d$Stage_avg), RC2_max_loess)
+  rc_loess_curve(d, RC2_SPAN, seq(lo, hi, by = 1)) |> mutate(era = era_label)
+}
+rc2_early_curve <- rc2_era_curve("early (pre-WY2021)")
+rc2_late_curve  <- rc2_era_curve("late (WY2022+)")
+rc2_era_curves  <- bind_rows(rc2_early_curve, rc2_late_curve)
+
+rc2_era_ratio <- if (!is.null(rc2_early_curve) && !is.null(rc2_late_curve)) {
+  s <- seq(max(min(rc2_early_curve$Stage_avg), min(rc2_late_curve$Stage_avg)),
+           min(max(rc2_early_curve$Stage_avg), max(rc2_late_curve$Stage_avg)), by = 1)
+  e <- approx(rc2_early_curve$Stage_avg, rc2_early_curve$Q_model, s)$y
+  l <- approx(rc2_late_curve$Stage_avg,  rc2_late_curve$Q_model,  s)$y
+  round(exp(mean(log(l / e), na.rm = TRUE)), 2)
+} else NA_real_
+```
+
+#### Residual vs time
+```{r rc2_resid_time}
+ggplotly(
+  ggplot(rc2_resid, aes(datetime, resid_pct, colour = era,
+                        label = paste0("Event ", Event_no, " | ", datetime,
+                                       " | ", round(Stage_avg, 1), " cm",
+                                       " | Q ", round(Q_meas, 2),
+                                       " | resid ", round(resid_pct, 1), "%"))) +
+    geom_hline(yintercept = 0, colour = "grey50") +
+    geom_smooth(aes(group = 1), method = "loess", span = 0.75, se = FALSE,
+                colour = "grey30", linewidth = 0.6, na.rm = TRUE) +
+    geom_point(size = 2, alpha = 0.85) +
+    scale_colour_manual(values = era_pal) +
+    theme_bw() + xlab(NULL) + ylab("residual (%)  (Q_meas - Q_curve) / Q_curve") +
+    labs(title = "RC2 -- gauging residual vs date",
+         subtitle = "grey line = LOESS trend; a coherent drift means the control shifted",
+         colour = "era")
+)
+```
+
+#### Residual vs stage
+```{r rc2_resid_stage}
+ggplotly(
+  ggplot(rc2_resid, aes(Stage_avg, resid_pct, colour = era,
+                        label = paste0("Event ", Event_no, " | ", datetime))) +
+    geom_hline(yintercept = 0, colour = "grey50") +
+    geom_point(size = 2, alpha = 0.85) +
+    scale_colour_manual(values = era_pal) +
+    theme_bw() + xlab("Stage (cm)") + ylab("residual (%)") +
+    labs(title = "RC2 -- residual vs stage, by era",
+         subtitle = "vertical offset between eras that persists across stage = a shift, not scatter",
+         colour = "era")
+)
+```
+
+#### Median residual by water year
+```{r rc2_resid_tbl}
+knitr::kable(rc2_resid_by_wy,
+             caption = "RC2 -- gauging residual against the pooled curve, by water year")
+```
+
+#### Early vs late curve
+```{r rc2_era_overlay}
+ggplotly(
+  ggplot() +
+    geom_point(data = rc2_resid, aes(Stage_avg, Q_meas, colour = era,
+               label = paste0("Event ", Event_no, " | ", datetime)),
+               size = 2, alpha = 0.7) +
+    geom_line(data = rc2_era_curves, aes(Stage_avg, Q_model, colour = era),
+              linewidth = 0.9) +
+    scale_colour_manual(values = era_pal) +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = paste0("RC2 -- separate LOESS per era (span ", RC2_SPAN,
+                        "); WY2021 points shown, not fitted"),
+         subtitle = paste0("late/early discharge ratio at common stages ~= ",
+                           rc2_era_ratio, "x"),
+         colour = "era")
+)
+```
+
+```{r rc2_save, include=FALSE}
+RC2_lookup <- RatingCI_RC2_interp |>
+  mutate(Start = format(as.Date("2018-09-14"), "%m/%d/%Y %H:%M"), Rating = 4L,
+         Stage_avg = round(Stage_avg, 1), Q_model = round(Q_model, 4),
+         Max_CI = round(Max_CI, 4), Min_CI = round(Min_CI, 4)) |>
+  select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating)
+
+write_csv(RC2_lookup, file.path(out_dir, "ssn703_RC2_rating_curve_v1.csv"))
+write_csv(HQ_RC2,     file.path(out_dir, "ssn703_RC2_stagedischarge_v1.csv"))
+```
+
+---
+
+## RC3 -- loc_3 (2023-09-15 onward) {.tabset}
+
+_`r nrow(HQ_RC3)` gaugings. All New -- sensor D at loc_3 entirely post-dates the previous pipeline._
+
+### Data assessment {.tabset}
+
+#### Overview
+```{r rc3_overview}
+ggplotly(ggplot(HQ_RC3, aes(Stage_avg, Q_meas, fill = factor(WY),
+                            label = paste0("Event ", Event_no, " | ", datetime))) +
+  geom_point(shape = 21, size = 2) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC3 -- by water year (sparse)", fill = "WY"))
+```
+
+#### With uncertainty
+```{r rc3_unc}
+ggplotly(ggplot(HQ_RC3, aes(Stage_avg, Q_meas, ymin = Q_meas - Q_abs_unc, ymax = Q_meas + Q_abs_unc,
+                            colour = factor(WY), label = paste0("Event ", Event_no))) +
+  geom_pointrange(size = 0.4) + theme_bw() +
+  xlab("Stage (cm)") + ylab("Discharge (m3/s)") + labs(title = "RC3 -- with uncertainty", colour = "WY"))
+```
+
+### Power law fit -- final curve
+
+_Full power law Q = a(h - h0)^b on all RC3 gaugings (LOESS not used -- data too sparse). CI = +/-10% within the gauged range._
+
+```{r rc3_final, include=FALSE}
+fit_RC3 <- rc_fit_powerlaw(HQ_RC3)   # default h0 = 0.9 * min positive-Q stage, nls with fallback
+a_RC3 <- fit_RC3$a; b_RC3 <- fit_RC3$b; h0_RC3 <- fit_RC3$h0
+
+RC3_min_gauged <- min(HQ_RC3$Stage_avg)
+RC3_stage <- seq(round(h0_RC3 + 1, 1), 218, by = 0.1)
+RC3_curve <- tibble(Stage_avg = RC3_stage, Q_model = fit_RC3$fn(RC3_stage))
+
+# Flat placeholder CI: +/-10% within gauged range, +/-20% below minimum gauged
+# stage. See "Low-flow uncertainty model" below for the fitted alternative.
+RC3_pl_CI <- RC3_curve |>
+  mutate(Max_CI = if_else(Stage_avg < RC3_min_gauged, Q_model * 1.20, Q_model * 1.10),
+         Min_CI = if_else(Stage_avg < RC3_min_gauged, Q_model * 0.80, Q_model * 0.90))
+```
+
+_RC3 power law: a = `r round(a_RC3, 4)`, b = `r round(b_RC3, 4)`, h0 = `r round(h0_RC3, 1)` cm.
+Extended from h0+1 cm to 218 cm. CI = +/-10% within the gauged range
+(`r round(RC3_min_gauged, 1)`-218 cm); +/-20% below the minimum gauged stage --
+**no gaugings exist below `r round(RC3_min_gauged, 1)` cm at loc_3**._
+
+```{r rc3_final_plot}
+ggplotly(
+  ggplot(RC3_pl_CI, aes(Stage_avg)) +
+    geom_ribbon(aes(ymin = Min_CI, ymax = Max_CI), fill = "grey80") +
+    geom_vline(xintercept = RC3_min_gauged, linetype = "dashed", colour = "orange") +
+    geom_pointrange(data = HQ_RC3, aes(Stage_avg, Q_meas,
+                    ymin = Q_meas - Q_abs_unc, ymax = Q_meas + Q_abs_unc,
+                    label = paste0("Event ", Event_no)), size = 0.4) +
+    geom_line(aes(y = Q_model, colour = Stage_avg < RC3_min_gauged)) +
+    scale_colour_manual(values = c(`FALSE` = "#333333", `TRUE` = "#E07B54"),
+                        labels = c(`FALSE` = "fitted range", `TRUE` = "extrapolated (no gaugings)")) +
+    theme_bw() + xlab("Stage (cm)") + ylab("Discharge (m3/s)") +
+    labs(title = "SSN703 RC3 -- final rating curve v1 (power law)",
+         subtitle = "provisional -- sparse gaugings; low flow entirely extrapolated", colour = "range")
+)
+```
+
+```{r rc3_save, include=FALSE}
+## ACTION REQUIRED: to adopt the fitted low-flow CI (see next section),
+## replace RC3_pl_CI with RC3_pl_CI_v2 here before writing the lookup.
+RC3_lookup <- RC3_pl_CI |>
+  mutate(Start = format(as.Date("2023-09-15"), "%m/%d/%Y %H:%M"), Rating = 5L,
+         Stage_avg = round(Stage_avg, 1), Q_model = round(Q_model, 4),
+         Max_CI = round(Max_CI, 4), Min_CI = round(Min_CI, 4)) |>
+  select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating)
+
+write_csv(RC3_lookup, file.path(out_dir, "ssn703_RC3_rating_curve_v1.csv"))
+write_csv(HQ_RC3,     file.path(out_dir, "ssn703_RC3_stagedischarge_v1.csv"))
+
+# Combined lookup: v4 Ratings 1-3 + new Ratings 4-5
+ssn703_lookup_combined <- bind_rows(
+  ratingcurve_v4 |> select(Start, Stage_avg, Q_model, Max_CI, Min_CI, Rating) |>
+    mutate(across(c(Stage_avg), ~ round(.x, 1)),
+           across(c(Q_model, Max_CI, Min_CI), ~ round(.x, 4))),
+  RC2_lookup, RC3_lookup
+)
+write_csv(ssn703_lookup_combined, file.path(out_dir, "ssn703_rating_curve_lookup_combined.csv"))
+```
+
+---
+
+## Low-flow uncertainty model
+
+_A fitted alternative to RC3's flat +/-20% extrapolated CI: pooled RC2+RC3
+field-measured `Q_rel_unc` vs discharge. Not yet adopted into the saved lookup
+(see ACTION REQUIRED in `rc3_save`)._
+
+```{r low_flow_unc, include=FALSE}
+low_flow_dir <- file.path(out_dir, "curve_validation")
+dir.create(low_flow_dir, showWarnings = FALSE, recursive = TRUE)
+
+unc_pool <- bind_rows(
+  HQ_RC2 |> select(Stage_avg, Q_meas, Q_rel_unc) |> mutate(source = "RC2"),
+  HQ_RC3 |> select(Stage_avg, Q_meas, Q_rel_unc) |> mutate(source = "RC3")
+)
+unc_model <- rc_low_flow_unc_model(unc_pool)
+
+RC3_ci_floor_abs <- median(HQ_RC3$Q_abs_unc[HQ_RC3$Stage_avg <= RC3_min_gauged + 10], na.rm = TRUE)
+if (is.na(RC3_ci_floor_abs)) RC3_ci_floor_abs <- 0
+
+RC3_pl_CI_v2 <- RC3_pl_CI |>
+  mutate(
+    rel_pct = unc_model$predict_pct(Q_model) / 100,
+    frac    = pmin(pmax((RC3_min_gauged - Stage_avg) / (RC3_min_gauged - (h0_RC3 + 1)), 0), 1),
+    mult    = 1 + (CI_MULTIPLIER_CAP - 1) * frac^CI_GROWTH_POWER,
+    hw      = pmax(Q_model * rel_pct, RC3_ci_floor_abs * mult),
+    Max_CI  = if_else(Stage_avg < RC3_min_gauged, Q_model + hw, Max_CI),
+    Min_CI  = if_else(Stage_avg < RC3_min_gauged, pmax(Q_model - hw, 0), Min_CI)
+  ) |>
+  select(-rel_pct, -frac, -mult, -hw)
+
+write_csv(RC3_pl_CI_v2 |> select(Stage_avg, Q_model, Max_CI, Min_CI),
+          file.path(low_flow_dir, "rc3_low_end_uncertainty_fitted.csv"))
+```
+
+Fit: log(relative uncertainty %) ~ log(discharge), R2 = `r round(unc_model$r2, 3)`
+(`r nrow(unc_pool)` gaugings pooled). A low R2 means the trend itself carries real
+uncertainty -- state that alongside any numbers pulled from it.
+
+```{r low_flow_unc_plot}
+fit_line <- tibble(Q_meas = exp(seq(log(min(unc_pool$Q_meas, na.rm = TRUE)),
+                                    log(max(unc_pool$Q_meas, na.rm = TRUE) * 1.5), length.out = 100))) |>
+  mutate(pct = unc_model$predict_pct(Q_meas))
+p_unc <- plot_ly() |>
+  add_markers(data = unc_pool, x = ~Q_meas, y = ~Q_rel_unc, color = ~source) |>
+  add_lines(data = fit_line, x = ~Q_meas, y = ~pct, name = "fitted trend",
+            line = list(color = "black", dash = "dash")) |>
+  layout(title = "Field relative uncertainty vs discharge (RC2+RC3 pooled)",
+         xaxis = list(title = "Discharge (m3/s)", type = "log"),
+         yaxis = list(title = "Relative uncertainty (%)", type = "log"))
+saveWidget(p_unc, file.path(low_flow_dir, "low_flow_uncertainty_fit.html"), selfcontained = TRUE)
+p_unc
+```
+
+---
+
+## Summary
+
+| Rating | Applied | n | Gauged range (cm) | Full range incl. extrapolation (cm) | h0 (cm) | Method |
+|:--|:--|:--|:--|:--|:--|:--|
+| RC2 (Rating 4) | 2018-09-14 to 2023-09-15 | `r nrow(HQ_RC2)` | `r round(min(HQ_RC2$Stage_avg),1)`-`r round(max(HQ_RC2$Stage_avg),1)` | `r round(RC2_min_raw_stage_cm,1)`-218 | `r round(fit_RC2$h0,1)` | LOESS + power-law tails |
+| RC3 (Rating 5) | 2023-09-15 onward | `r nrow(HQ_RC3)` | `r round(min(HQ_RC3$Stage_avg),1)`-`r round(max(HQ_RC3$Stage_avg),1)` | `r round(h0_RC3+1,1)`-218 | `r round(h0_RC3,1)` | full power law |
+
+**Consolidation note:** LOESS / power-law / interpolation / stage-uncertainty /
+bootstrap-CI code is now in `rating_curve/rating_curve_functions.R`. The three
+row-misalignment fixes the previous version carried inline
+(`HQ_unc()` output pairing, `CI_model_input()` argument order, CI-to-curve join)
+are gone -- `rc_stage_uncertainty()` and `rc_bootstrap_ci()` return keyed
+tibbles, so there is no row order to get wrong.
+
+**Outstanding:**
+
+- **Approve the RC2 / RC3 gaugings.** The fit sets are seeded to the old
+  auto-filter selection; review the "Gauging review" plots and set
+  `final_rating` in `03_docs/metadata/ssn703_rating_approvals.csv`, then re-run
+  `prep_gaugings.R` and re-knit. `n` above will move as gaugings are demoted.
+- **RC2 temporal shift -- unresolved.** The "Residual diagnostics" tab shows a
+  coherent ~-18% -> +8% drift across the RC2 period; the pooled curve here is a
+  compromise that fits neither end. WY2020-2021 (stage-bearing) is now in the
+  fit as the transition, and 2020-09-23 is out. Still to decide: split RC2 into
+  early / late sub-ratings, or apply a time-varying shift correction. Sensor-C
+  `offset_applied` is 0 throughout and its median raw stage is stable, so this
+  is a channel-control change, not a datum artifact.
+- River-right EC probe (SSN703DS) dead since 2025-10-23 -- no new RC3 gaugings
+  possible. Blocks closing RC3's low-flow gap and testing RC2's reused-exponent
+  assumption.
+- Decide whether to adopt `RC3_pl_CI_v2` (fitted low-end uncertainty) into
+  `RC3_lookup`.
+
+**Outputs (`04_outputs/`):** `ssn703_RC2_rating_curve_v1.csv`,
+`ssn703_RC3_rating_curve_v1.csv`, `ssn703_RC{2,3}_stagedischarge_v1.csv`,
+`ssn703_rating_curve_lookup_combined.csv`,
+`curve_validation/low_flow_uncertainty_fit.html`,
+`curve_validation/rc3_low_end_uncertainty_fitted.csv`.

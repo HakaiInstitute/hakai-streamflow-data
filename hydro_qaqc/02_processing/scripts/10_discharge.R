@@ -96,15 +96,15 @@ stage_rc2 <- read_csv(
   show_col_types = FALSE
 )
 
-message("RC2 rows: ", nrow(stage_rc2))
-message("RC2 date range: ", min(stage_rc2$timestamp), " to ", max(stage_rc2$timestamp))
+# message("RC2 rows: ", nrow(stage_rc2))
+# message("RC2 date range: ", min(stage_rc2$timestamp), " to ", max(stage_rc2$timestamp))
 
-# Filter to RC2 start date (2019-02-09) -- earlier stage exists but discharge
-# for that period was handled by the previous pipeline
-stage_rc2 <- stage_rc2 |>
-  filter(timestamp >= as.POSIXct("2019-02-09 00:00:00", tz = "UTC"))
+# # Filter to RC2 start date (2019-02-09) -- earlier stage exists but discharge
+# # for that period was handled by the previous pipeline
+# stage_rc2 <- stage_rc2 |>
+#   filter(timestamp >= as.POSIXct("2019-02-09 00:00:00", tz = "UTC"))
 
-message("RC2 rows after 2019-02-09 filter: ", nrow(stage_rc2))
+# message("RC2 rows after 2019-02-09 filter: ", nrow(stage_rc2))
 
 # Apply rating curve
 discharge_rc2 <- stage_rc2 |>

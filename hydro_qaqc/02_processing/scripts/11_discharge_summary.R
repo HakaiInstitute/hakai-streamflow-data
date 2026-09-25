@@ -52,7 +52,7 @@ discharge <- read_csv("04_outputs/ssn703_discharge_combined.csv",
     year_month = floor_date(timestamp, unit = "month"),
     month      = month(timestamp, label = TRUE, abbr = TRUE),
     # specific discharge: m3/s -> L/s/km2
-    Q_spec     = Q_model * 1000 / catchment_area_km2
+    Q_spec     = Q_model / catchment_area_km2#*1000togettolitres
   )
 
 message("Loaded ", nrow(discharge), " rows")

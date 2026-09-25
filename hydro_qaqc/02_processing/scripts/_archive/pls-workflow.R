@@ -56,8 +56,25 @@ FORCE_FILL_WINDOWS <- tibble(
 # Sensor reporting but values wrong end to end (not a transmission gap).
 # Rebuilt from SA in section 5b; end = NA means to end of record.
 BAD_DATA_WINDOWS <- tibble(
-  start = as.POSIXct("2023-06-25 00:00:00"),
-  end   = as.POSIXct(NA)
+  start = as.POSIXct("2023-10-24 00:00:00"),
+  end   = as.POSIXct("2023-11-26 10:55:00")
+)
+
+# -- Manual stage-offset correction (manual) --
+# Known offset between sensor generations/replacements -- applied to raw
+# value in section 1b, before any QC. end = NA means to end of record.
+# Default no-op here; SSN703 is active for this run right after data load
+# (section 1), since its start references pls$measurement_time. For a site
+# whose window doesn't depend on pls, define it here instead, e.g.:
+# OFFSET_WINDOWS <- tibble(
+#   start    = as.POSIXct("2014-09-10 00:00:00"),
+#   end      = as.POSIXct("2015-01-01 00:00:00"),
+#   offset_m = 0.02
+# )
+OFFSET_WINDOWS <- tibble(
+  start    = as.POSIXct(character()),
+  end      = as.POSIXct(character()),
+  offset_m = numeric()
 )
 
 # SA -> PLS3 reconstruction (section 5b):
@@ -65,7 +82,7 @@ SA_FIT_WINDOW_DAYS <- 365   # trusted window before the bad period to fit on
 SA_FIT_SPLINE_DF   <- 4     # ns() df on SA -- allows the relationship to curve
 SA_MAX_INTERP_MINS <- 35    # max SA gap to interpolate; longer stays NA (-> MV)
 
-MEASUREMENT_NAME <- "PLS_Lvl3"
+MEASUREMENT_NAME <- "PLS_Lvl"
 SITE             <- "SSN703US"
 QC_BY            <- "emily.haughton@hakai.org"
 
@@ -78,6 +95,48 @@ sa  <- sa_raw  |> arrange(measurement_time) |> select(measurement_time, stage_sa
 
 message("Loaded ", nrow(pls), " rows for ", MEASUREMENT_NAME)
 message("Loaded ", nrow(sa), " rows of SA sensor data")
+
+# SSN703 RC1 offset: +0.02 m to align the PLS sensor with PLS2, for the RC1
+# rating period (start of PLS record through 2017-10-12 inclusive). Depends
+# on pls$measurement_time, so set here rather than in section 0.
+OFFSET_WINDOWS <- tibble(
+  start    = min(pls$measurement_time),  # start of PLS record
+  end      = as.POSIXct("2017-10-12 23:59:59"),
+  offset_m = 0.02
+)
+
+
+# -----------------------------------------------------------------------------
+# 1b. Manual stage-offset correction (manual)
+# -----------------------------------------------------------------------------
+# Applies offset_m to raw value within each OFFSET_WINDOWS window, before any
+# QC runs -- range/flatline/gap-fill all then operate on the corrected
+# series. end = NA means to end of record. offset_applied_m records which
+# rows were corrected and by how much (NA where no offset applied).
+tz_data <- attr(pls$measurement_time, "tzone")
+if (is.null(tz_data) || !nzchar(tz_data)) tz_data <- ""
+
+pls$offset_applied_m <- NA_real_
+
+if (nrow(OFFSET_WINDOWS) > 0) {
+  offset_windows <- OFFSET_WINDOWS |>
+    mutate(
+      start = lubridate::force_tz(as.POSIXct(start), tz_data),
+      end   = lubridate::force_tz(as.POSIXct(end),   tz_data),
+      end   = dplyr::coalesce(end, max(pls$measurement_time, na.rm = TRUE))
+    )
+
+  for (i in seq_len(nrow(offset_windows))) {
+    in_window <- pls$measurement_time >= offset_windows$start[i] &
+      pls$measurement_time <= offset_windows$end[i]
+    pls$value[in_window]            <- pls$value[in_window] + offset_windows$offset_m[i]
+    pls$offset_applied_m[in_window] <- offset_windows$offset_m[i]
+  }
+}
+
+n_offset <- sum(!is.na(pls$offset_applied_m))
+message("Stage offset correction: ", n_offset, " rows adjusted across ",
+        nrow(OFFSET_WINDOWS), " window(s)")
 
 
 # -----------------------------------------------------------------------------
@@ -421,6 +480,7 @@ if (n_before_validation > 0) {
 pls <- pls |>
   mutate(
     qc_flag = case_when(
+      origin == "raw" & !is.na(offset_applied_m)             ~ "offset_corrected",
       origin == "raw"                                       ~ "raw",
       origin == "flatline"                                   ~ "flagged_flatline",
       fill_method == "sa"                                    ~ "gf_sa",
@@ -463,11 +523,12 @@ print(qc_check_missing(pls, value_qc, qc_flag))
 # MV = missing/unfillable
 #
 # quality_level: 2 = raw + unfilled/unfillable (includes bad_data), 3 =
-# gap-filled/estimated (fill_method not NA)
+# gap-filled/estimated (fill_method not NA, or offset_corrected)
 pls_upload <- pls |>
   mutate(
-    quality_level = if_else(!is.na(fill_method), 3, 2),
+    quality_level = if_else(!is.na(fill_method) | qc_flag == "offset_corrected", 3, 2),
     qc_flag_code = case_when(
+      qc_flag == "offset_corrected" ~ glue("AV:EV: Stage offset of {offset_applied_m} m applied to align sensor generations"),
       qc_flag == "gf_sa"           ~ "AV:EV: Transmission gap filled using SA sensor relationship",
       qc_flag == "recon_sa"        ~ glue("AV:EV: Primary sensor failed; series reconstructed from SA sensor via fitted SA->PLS3 relationship (natural spline, {SA_FIT_WINDOW_DAYS}-day fit window)"),
       qc_flag == "gf_spline"       ~ "AV:EV: Transmission gap filled via spline interpolation",
@@ -516,7 +577,7 @@ pls_for_db <- pls_upload |>
 
 glimpse(pls_for_db)
 
-saveRDS(pls_for_db, "pls2_for_db_SSN703US_2017-11-13to2021-03-21.rds")
+saveRDS(pls_for_db, "pls4_for_db_SSN703US_2021-09-02to2026-09-01.rds")
 
 # -----------------------------------------------------------------------------
 # 10. Visualize results
@@ -528,6 +589,12 @@ print(chunks, n = Inf)
 print(qc_plot_review(pls, measurement_time, value, value_qc, qc_flag, chunks = chunks))
 
 print(qc_plot_interactive(pls, measurement_time, value, value_qc, qc_flag))
+
+pls_av <- pls_upload %>%
+  filter(grepl("AV", qc_flag_code))
+
+plot(pls_av$measurement_time, pls_av$value_qc, type = "l",
+     xlab = "Time", ylab = "Stage (m)", main = "AV-flagged values")
 
 # SA -> PLS3 fit diagnostic (only exists if a bad-data window was reconstructed)
 if (exists("sa_recon_plot")) print(sa_recon_plot)

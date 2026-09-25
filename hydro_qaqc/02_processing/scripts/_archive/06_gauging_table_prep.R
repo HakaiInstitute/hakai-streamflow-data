@@ -21,7 +21,7 @@
 #
 # Offset application:
 #   ssn703_a era: before 2017-11-13 14:00 (ssn703_b install date)
-#   Offset: +2cm added to Stage_avg to bring onto ssn703_b datum
+#   Offset: +2cm added to Stage_avg to bring givonto ssn703_b datum
 #   Gaugings from 2017-11-13 onward: ssn703_b is authoritative -- no offset
 #
 # Stage units:
