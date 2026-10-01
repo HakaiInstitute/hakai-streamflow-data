@@ -1,5 +1,5 @@
 ---
-title: "Untitled"
+title: "Stage/Discharge QC"
 format: typst
 ---
 
@@ -77,6 +77,7 @@ Sys.sleep(1)
 ## OVerview
 
 ```{r}
+#| fig-height: 8
 dat <- dat0626 |> 
   bind_rows(dat0693) |>
   bind_rows(dat0703) |>
@@ -91,7 +92,6 @@ alldat <- dat |>
 
 
 alldat |> 
-  # filter(n > 100) |> 
   filter(status == "Discharge without Stage") |>
   ggplot(aes(y = year, x = n, fill = station_id)) +
   geom_col() +
@@ -106,8 +106,8 @@ alldat |>
 ```
 
 ```{r}
-dat1015 |>
-  filter(year == 2019) |>
+dat |>
+  filter((station_id == "H08KC1015" & year == 2024) | (station_id == "H08KC0708" & year == 2013)) |> 
   ggplot(aes(x = time, y = discharge_rate, colour = status)) +
   geom_point(size = 0.1) +
   facet_wrap(vars(year), scales = "free_x", ncol = 1) +
